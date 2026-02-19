@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#define LED 7
+#define LED A7
 
 void setup() {
   Serial.begin(921600);
