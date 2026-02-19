@@ -11,9 +11,11 @@ AHRS navx(SPI, 200);  // Will change below for I2C
 void setup() {
     Serial.begin(921600);
     Wire.begin();
+    delay(2000);
+    Serial.println("beginning...");
 
     // Proper I2C constructor:
-    navx = AHRS(I2C, 200);  // 200 Hz update rate
+    navx = AHRS(I2C, 200); // 200 Hz update rate
 
     delay(1000);
 }
