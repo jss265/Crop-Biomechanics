@@ -11,4 +11,5 @@ void loop() {
   delay(500);
   digitalWrite(LED, LOW);
   delay(500);
+  Serial.println("still looping");
 }
