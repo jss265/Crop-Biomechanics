@@ -7,9 +7,9 @@
 void blinkLED();
 
 void setup() {
-    Wire.begin(A5, A4);            // SDA=21, SCL=22 by default
+    Wire.begin(A5, A4);
     Wire.setClock(400000);   // optional: faster I2C (400 kHz)
-    Serial.begin(921600);    // match your monitor_speed
+    Serial.begin(921600);
     pinMode(LED, OUTPUT);
 }
 
