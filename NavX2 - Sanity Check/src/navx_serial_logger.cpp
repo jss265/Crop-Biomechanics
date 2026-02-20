@@ -26,8 +26,16 @@ void loop() {
         return;
     }
 
+    // ----- Dedup: skip if navX hasn't produced a new sample yet -----
+    static long lastTimestamp = -1;
+    long rawTimestamp = navx.getLastSensorTimestamp(); // ms, integer comparison avoids float equality issues
+    if (rawTimestamp == lastTimestamp) {
+        return; // no new packet; loop() will be called again immediately
+    }
+    lastTimestamp = rawTimestamp;
+
     // ----- Timestamp -----
-    float timestamp = navx.getLastSensorTimestamp() / 1000.0f; // ms → seconds
+    float timestamp = rawTimestamp / 1000.0f; // ms → seconds
 
     // ----- Orientation (degrees → keep in degrees or convert?) -----
     float yaw   = navx.getYaw();
@@ -45,16 +53,27 @@ void loop() {
     float accelZ = navx.getRawAccelZ() * G_TO_MPS2;
 
     // ----- Fixed Width Output -----
-    Serial.printf(
-        "%10.2f "  // timestamp (s)
-        "%8.2f %8.2f %8.2f "  // yaw pitch roll (deg)
-        "%10.2f %10.2f %10.2f "  // gyro (rad/s)
-        "%10.2f %10.2f %10.2f\n",  // accel (m/s^2)
+    // Comment out any row to disable that field.
+    // Python ACTIVE_FIELDS must mirror whatever is active here.
+    struct LogField { const char* fmt; float val; };
+    LogField fields[] = {
+        {"%10.2f ", timestamp},  // timestamp (s)
+        {"%8.2f ",  yaw},        // yaw (deg)
+        {"%8.2f ",  pitch},      // pitch (deg)
+        {"%8.2f ",  roll},       // roll (deg)
+        {"%10.2f ", gyroX},      // gyroX (rad/s)
+        {"%10.2f ", gyroY},      // gyroY (rad/s)
+        {"%10.2f ", gyroZ},      // gyroZ (rad/s)
+        {"%10.2f ", accelX},     // accelX (m/s^2)
+        {"%10.2f ", accelY},     // accelY (m/s^2)
+        {"%10.2f ", accelZ},     // accelZ (m/s^2)
+    };
 
-        timestamp,
-        yaw, pitch, roll,
-        gyroX, gyroY, gyroZ,
-        accelX, accelY, accelZ
-    );
+    // '$' header byte lets Python detect packet boundaries
+    Serial.print("$");
+    for (const auto& f : fields) {
+        Serial.printf(f.fmt, f.val);
+    }
+    Serial.println();
 
 }
