@@ -13,7 +13,7 @@ from navx_types import NavXFrame, ACTIVE_FIELDS
 import Processor
 
 # ─── Configure ────────────────────────────────────────────────────────────────
-PORT      = "COM3"
+PORT      = "COM11"  # 'COM11' for Alex's computer, 
 BAUD_RATE = 921600
 HEADER    = "$"        # must match Serial.print("$") in the .cpp
 
