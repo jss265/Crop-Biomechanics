@@ -13,9 +13,9 @@ from navx_types import NavXFrame, ACTIVE_FIELDS
 import Processor
 
 # ─── Configure ────────────────────────────────────────────────────────────────
-PORT      = "COM11"  # 'COM11' for Alex's computer, 
+PORT      = "COM25"  # 'COM25' for my computer
 BAUD_RATE = 921600
-HEADER    = "$"        # must match Serial.print("$") in the .cpp
+HEADER    = "$"      # must match Serial.print("$") in the .cpp
 
 
 # ─── Thread 1: Serial Reader ───────────────────────────────────────────────────

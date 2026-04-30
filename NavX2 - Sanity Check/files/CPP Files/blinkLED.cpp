@@ -2,8 +2,10 @@
 #define LED A7
 
 void setup() {
-  Serial.begin(921600);
+  Serial.begin(115200);
   pinMode(LED, OUTPUT);
+  delay(2000);
+  Serial.println("Done");
 }
 
 void loop() {

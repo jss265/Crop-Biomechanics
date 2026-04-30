@@ -39,7 +39,7 @@ uint8_t readNavXRegisters(uint8_t reg, uint8_t* buf, uint8_t count) {
 // ─── setup() ──────────────────────────────────────────────────────────────────
 
 void setup() {
-    Serial.begin(921600);
+    Serial.begin(115200);
     Wire.begin();
     delay(2000);
     Serial.println("beginning...");
@@ -78,8 +78,8 @@ void setup() {
 #define READ_LEN     (READ_END - READ_START + 1)  // 46 bytes
 
 // Offsets within the data buffer (relative to READ_START = 0x12)
-#define OFF_TIMESTAMP (NAVX_REG_TIMESTAMP_L_L - READ_START)  //  0
-#define OFF_YAW       (NAVX_REG_YAW_L         - READ_START)  //  4
+#define OFF_TIMESTAMP (NAVX_REG_TIMESTAMP_L_L  - READ_START)  //  0
+#define OFF_YAW       (NAVX_REG_YAW_L          - READ_START)  //  4
 #define OFF_ROLL      (NAVX_REG_ROLL_L         - READ_START)  //  6
 #define OFF_PITCH     (NAVX_REG_PITCH_L        - READ_START)  //  8
 #define OFF_GYRO_X    (NAVX_REG_GYRO_X_L       - READ_START)  // 34
