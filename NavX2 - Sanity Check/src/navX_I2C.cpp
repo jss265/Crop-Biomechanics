@@ -30,13 +30,18 @@ void loop()
   Wire.endTransmission();                                      // Stop transmitting
   
   /* Receive the echoed value back */
-  Wire.beginTransmission(NAVX_SENSOR_DEVICE_I2C_ADDRESS_7BIT); // Begin transmitting to navX-Sensor
-  Wire.requestFrom(NAVX_SENSOR_DEVICE_I2C_ADDRESS_7BIT, NUM_BYTES_TO_READ);    // Send number of bytes to read
+  int bytesRead = Wire.requestFrom(NAVX_SENSOR_DEVICE_I2C_ADDRESS_7BIT, NUM_BYTES_TO_READ);    // Send number of bytes to read
   delay(1);
-  while(Wire.available()) {                                    // Read data (slave may send less than requested)
-     data[i++] = Wire.read();
+
+  if (bytesRead == NUM_BYTES_TO_READ) {                                    // Read data (slave may send less than requested)
+    while(Wire.available()) {
+      data[i++] = Wire.read();
+    }
+  } else {
+      Serial.println("Error: Failed to read from NavX");
+      delay(ITERATION_DELAY_MS);
+      return; // Skip decoding and try again next loop
   }
-  Wire.endTransmission();                                      // Stop transmitting
 
   /* Decode received data to floating-point orientation values */
   float yaw =     IMURegisters::decodeProtocolSignedHundredthsFloat((char *)&data[0]);   // The cast is needed on arduino
