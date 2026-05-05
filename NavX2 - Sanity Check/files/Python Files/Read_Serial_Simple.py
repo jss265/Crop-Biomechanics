@@ -1,6 +1,6 @@
 import serial
 
-COM_PORT = "COM25"
+COM_PORT = "COM26"
 BAUD_RATE = 115200
 
 
