@@ -35,7 +35,7 @@ bool readNavXRegisters(uint8_t first_reg, uint8_t* buffer, uint8_t len)
         return false;
     }
 
-    int received = Wire.requestFrom(NAVX_I2C_ADDR, len);
+    int received = Wire.requestFrom(NAVX_I2C_ADDR, (uint8_t)len);
 
     if (received != len)
     {
@@ -117,27 +117,21 @@ void loop()
         return;
     }
 
-    // Orientation
+    // ----------------
+    // Update Everything
+    // ----------------
+
+    // Orientation (deg) (YPR {-180,180}, Heading {0,360})
     float yaw = IMURegisters::decodeProtocolSignedHundredthsFloat((char*)&rawData[NAVX_REG_YAW_L - FIRST_REGISTER]);
     float pitch = IMURegisters::decodeProtocolSignedHundredthsFloat((char*)&rawData[NAVX_REG_PITCH_L - FIRST_REGISTER]);
     float roll = IMURegisters::decodeProtocolSignedHundredthsFloat((char*)&rawData[NAVX_REG_ROLL_L - FIRST_REGISTER]);
     float compass_heading = IMURegisters::decodeProtocolUnsignedHundredthsFloat((char*)&rawData[NAVX_REG_HEADING_L - FIRST_REGISTER]);
     float fused_heading = IMURegisters::decodeProtocolUnsignedHundredthsFloat((char*)&rawData[NAVX_REG_FUSED_HEADING_L - FIRST_REGISTER]);
 
-    // Linear Acceleration (World Frame, gravity removed)
+    // Linear Acceleration (G) (World Frame, gravity removed)
     float linear_accel_x = IMURegisters::decodeProtocolSignedThousandthsFloat((char*)&rawData[NAVX_REG_LINEAR_ACC_X_L - FIRST_REGISTER]);
     float linear_accel_y = IMURegisters::decodeProtocolSignedThousandthsFloat((char*)&rawData[NAVX_REG_LINEAR_ACC_Y_L - FIRST_REGISTER]);
     float linear_accel_z = IMURegisters::decodeProtocolSignedThousandthsFloat((char*)&rawData[NAVX_REG_LINEAR_ACC_Z_L - FIRST_REGISTER]);
-
-    // Altitude / Pressure
-    float altitude = IMURegisters::decodeProtocol1616Float((char*)&rawData[NAVX_REG_ALTITUDE_D_L - FIRST_REGISTER]);
-    float pressure = IMURegisters::decodeProtocol1616Float((char*)&rawData[NAVX_REG_PRESSURE_DL - FIRST_REGISTER]);
-
-    // Quaternion
-    float quat_w = IMURegisters::decodeProtocolSignedThousandthsFloat((char*)&rawData[NAVX_REG_QUAT_W_L - FIRST_REGISTER]);
-    float quat_x = IMURegisters::decodeProtocolSignedThousandthsFloat((char*)&rawData[NAVX_REG_QUAT_X_L - FIRST_REGISTER]);
-    float quat_y = IMURegisters::decodeProtocolSignedThousandthsFloat((char*)&rawData[NAVX_REG_QUAT_Y_L - FIRST_REGISTER]);
-    float quat_z = IMURegisters::decodeProtocolSignedThousandthsFloat((char*)&rawData[NAVX_REG_QUAT_Z_L - FIRST_REGISTER]);
 
     // Velocity (m/s)
     float vel_x = IMURegisters::decodeProtocol1616Float((char*)&rawData[NAVX_REG_VEL_X_I_L - FIRST_REGISTER]);
@@ -149,7 +143,17 @@ void loop()
     float disp_y = IMURegisters::decodeProtocol1616Float((char*)&rawData[NAVX_REG_DISP_Y_I_L - FIRST_REGISTER]);
     float disp_z = IMURegisters::decodeProtocol1616Float((char*)&rawData[NAVX_REG_DISP_Z_I_L - FIRST_REGISTER]);
 
-    // Timestamp
+    // Quaternion
+    float quat_w = IMURegisters::decodeProtocolSignedThousandthsFloat((char*)&rawData[NAVX_REG_QUAT_W_L - FIRST_REGISTER]);
+    float quat_x = IMURegisters::decodeProtocolSignedThousandthsFloat((char*)&rawData[NAVX_REG_QUAT_X_L - FIRST_REGISTER]);
+    float quat_y = IMURegisters::decodeProtocolSignedThousandthsFloat((char*)&rawData[NAVX_REG_QUAT_Y_L - FIRST_REGISTER]);
+    float quat_z = IMURegisters::decodeProtocolSignedThousandthsFloat((char*)&rawData[NAVX_REG_QUAT_Z_L - FIRST_REGISTER]);
+
+    // Enviroment (m, mbar) 
+    float altitude = IMURegisters::decodeProtocol1616Float((char*)&rawData[NAVX_REG_ALTITUDE_D_L - FIRST_REGISTER]);
+    float pressure = IMURegisters::decodeProtocol1616Float((char*)&rawData[NAVX_REG_PRESSURE_DL - FIRST_REGISTER]);
+
+    // Timestamp (ms)
     uint32_t sensor_timestamp = IMURegisters::decodeProtocolUint32((char*)&rawData[NAVX_REG_TIMESTAMP_L_L - FIRST_REGISTER]);
 
     // Status
@@ -163,15 +167,14 @@ void loop()
     // Print Everything
     // ----------------
 
-    // Orientation
+    // Orientation (deg) (YPR {-180,180}, Heading {0,360})
     printFloat("Yaw", yaw);
     printFloat("Pitch", pitch);
     printFloat("Roll", roll);
-    
     printFloat("Compass Heading", compass_heading);
     printFloat("Fused Heading", fused_heading);
 
-    // Linear Acceleration (G)
+    // Linear Acceleration (G) (World Frame, gravity removed)
     printFloat("Accel X", linear_accel_x, 3);
     printFloat("Accel Y", linear_accel_y, 3);
     printFloat("Accel Z", linear_accel_z, 3);
@@ -192,13 +195,14 @@ void loop()
     printFloat("Y", quat_y, 4);
     printFloat("Z", quat_z, 4);
 
-    // Enviromental
+    // Enviroment (m, mbar)
     printFloat("Altitude (m)", altitude, 2);
     printFloat("Pressure (mb)", pressure, 2);
 
-    // System
+    // Timestamp (ms)
     printInt("Timestamp", sensor_timestamp);
     
+    // Status
     printFlags("Op Status", op_status, OP_STATUS_FLAGS);
     printFlags("Sensor Status", sensor_status, SENSOR_STATUS_FLAGS);
     printFlags("Cal Status", cal_status, CAL_STATUS_FLAGS);
