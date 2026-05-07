@@ -5,16 +5,17 @@ Thread 1 (reader)   : reads lines from serial, validates '$' header, puts raw li
 Thread 2 (consumer) : gets lines from queue, parses into NavXFrame, processes them
 """
 
+import re
 import queue
 import threading
 import serial
 from typing import Optional
-from navx_types import NavXFrame, ACTIVE_FIELDS
-import Processor
+import _Processor
+from _navx_types import NavXFrame, ACTIVE_FIELDS
 
 # ─── Configure ────────────────────────────────────────────────────────────────
-PORT      = "COM25"  # 'COM25' for my computer
-BAUD_RATE = 921600
+PORT      = "COM26"  # 'COM26' for my computer
+BAUD_RATE = 115200
 HEADER    = "$"      # must match Serial.print("$") in the .cpp
 
 
@@ -32,28 +33,17 @@ def reader_thread(ser: serial.Serial, pkt_queue: queue.Queue, stop: threading.Ev
         except serial.SerialException:
             break
 
-# ─── Thread 2: Consumer / Parser ──────────────────────────────────────────────
-def consumer_thread(pkt_queue: queue.Queue, stop: threading.Event):
-    """Parse lines from the queue into NavXFrame structs and process them."""
-    while not stop.is_set():
-        try:
-            line = pkt_queue.get(timeout=0.1)
-        except queue.Empty:
-            continue
-
-        frame = parse(line)
-        if frame:
-            process(frame)
-
-        pkt_queue.task_done()
-
 # ─── Parser ────────────────────────────────────────────────────────────────────
 def parse(line: str) -> Optional[NavXFrame]:
-    """Strip header byte, split on whitespace, zip against ACTIVE_FIELDS."""
-    tokens = line.lstrip(HEADER).strip().split()
+    line = line.lstrip(HEADER).strip()
+    pattern = '|'.join(ACTIVE_FIELDS)
+    tokens = re.split(pattern, line)
+    
+    if tokens and tokens[0] == '':
+        tokens.pop(0)
 
     if len(tokens) != len(ACTIVE_FIELDS):
-        return None  # wrong field count — dropped packet
+        return None
 
     frame = NavXFrame()
     try:
@@ -64,14 +54,6 @@ def parse(line: str) -> Optional[NavXFrame]:
 
     return frame
 
-# ─── Processing hook ──────────────────────────────────────────────────────────
-def process(frame: NavXFrame):
-    """
-    Process data from processor.py. 
-    frame will be discarded after process call unless processor.py does something with it
-    """
-    Processor.process(frame)
-
 # ─── Main ─────────────────────────────────────────────────────────────────────
 def main():
     pkt_queue = queue.Queue(maxsize=500)
@@ -79,20 +61,27 @@ def main():
 
     print(f"Opening {PORT} at {BAUD_RATE} baud...")
     with serial.Serial(PORT, BAUD_RATE, timeout=1) as ser:
-        print("Connected.\n")
-
-        t_reader   = threading.Thread(target=reader_thread,   args=(ser, pkt_queue, stop), daemon=True)
-        t_consumer = threading.Thread(target=consumer_thread, args=(pkt_queue, stop),      daemon=True)
-
+        t_reader = threading.Thread(target=reader_thread, args=(ser, pkt_queue, stop), daemon=True)
         t_reader.start()
-        t_consumer.start()
+        print("Connected. Press ESC to stop.\n")
 
         try:
-            t_reader.join()
-            t_consumer.join()
+            while not stop.is_set() and getattr(_Processor, 'is_running', True):
+                try:
+                    line = pkt_queue.get(timeout=0.01)
+                except queue.Empty:
+                    continue
+
+                frame = parse(line)
+                if frame:
+                    _Processor.process(frame)
+                pkt_queue.task_done()
         except KeyboardInterrupt:
-            print("\nStopping...")
-            stop.set()
+            pass
+            
+        stop.set()
+        t_reader.join()
+        print("\nStopped.")
 
 if __name__ == "__main__":
     main()
