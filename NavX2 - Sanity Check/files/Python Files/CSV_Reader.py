@@ -8,8 +8,12 @@ data_folder = "data"
 file_names = os.listdir(data_folder)
 for i, filename in enumerate(file_names):
 	print(i, filename)
-file_name = input('Copy and paste the file you want to visualize: ')
-file_path = os.path.join(data_folder, file_name)
+file_name_input = input('Copy and paste the file name or number you want to visualize: ')
+if file_name_input.isdigit():
+	file_path = file_names[int(file_name_input)]
+	file_path = os.path.join(data_folder, file_path)
+else:
+	file_path = os.path.join(data_folder, file_name_input)
 
 with open(file_path, "r") as f:
 	meta_date = f.readline().strip().split(',', 1)[1]
