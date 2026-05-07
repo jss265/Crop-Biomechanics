@@ -6,8 +6,8 @@ import matplotlib.pyplot as plt
 
 data_folder = "data"
 file_names = os.listdir(data_folder)
-for filename in file_names:
-	print(filename)
+for i, filename in enumerate(file_names):
+	print(i, filename)
 file_name = input('Copy and paste the file you want to visualize: ')
 file_path = os.path.join(data_folder, file_name)
 
