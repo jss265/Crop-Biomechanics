@@ -120,6 +120,7 @@
 #include <ArduinoOTA.h> // For Over-The-Air updates
 #include <deque>        // For queuing packets to batch sends
 #include <vector>       // For storing binary packet data
+#include "NavX2I2C.h"   // Custom NavX2 implementation wrapper
 
 #define FULL_SCALE (1LL << 23) // 2^23 for 24-bit signed scaling - retained for reference, though not used in raw output
 #define A_DRDY_PIN 10
@@ -199,6 +200,10 @@ State_WiFi WiFiState = CONNECTING;
 
 // Global flag for Serial presence, set in setup
 bool hasSerial = false;
+
+// NavX2 Instantiation
+NavX2I2C navx;
+bool navx_ok = false;
 
 // Interrupt handlers for each possible sensor (0 to 4, corresponding to A to E).
 // These are defined as separate functions to ensure compatibility with attachInterrupt on ESP32.
@@ -458,6 +463,9 @@ void initializeADCs() {
   enableADCInterrupts();
   delay(50);
   time_init = micros();
+
+  // Sync NavX2 with ADCs
+  navx.setTimeOrigin((uint32_t)time_init);
 }
 
 // Handle OTA updates (called only in non-CONNECTED states)
@@ -467,6 +475,17 @@ void handleOTA() {
 
 // Check if all data pairs are ready for this cycle
 bool checkDataReady() {
+
+  // CRITICAL NOTE: Delete this bypass after isolated NavX2 testing
+  static unsigned long lastNavXPacket = 0;
+  unsigned long now = millis();
+
+  if  (now - lastNavXPacket >= 20) {
+    lastNavXPacket = now;
+    return true;
+  }
+  // ------------- BYPASS ABOVE -------------
+  
   uint8_t all_ready_mask = (1U << NUM_SENSORS) - 1;  // Local compile-time constant. Stored in CPU stack for compare, not created in and read from RAM.
   if (ready_mask == all_ready_mask) {
     ready_mask = 0;   // reset all bits in the mask to 0
@@ -478,7 +497,10 @@ bool checkDataReady() {
 // Build a binary packet from current data and add to queue
 void queueDataPacket() {
   // Calculate packet payload length: 1 byte ID + sensors * (4 ts + 4 raw1 + 4 raw2)
-  size_t payload_len = 1 + NUM_SENSORS * 12;
+  // Plus NavX2 payload length: 51 bytes = flags(1) + timestamps(8)
+  // + 12 two-byte motion/orientation fields(24) + displacement xyz(12)
+  // + sensor/capability status(4) + cal/self-test status(2)
+  size_t payload_len = 1 + NUM_SENSORS * 12 + navx.binaryPayloadBytes();
 
   // Build payload separately
   std::vector<uint8_t> payload;
@@ -501,7 +523,11 @@ void queueDataPacket() {
     payload.insert(payload.end(), raw2_ptr, raw2_ptr + sizeof(int32_t));
   }
 
+  // Add NavX2 data to payload
+  navx.appendBinaryPayload(payload);
+
   // Compute CRC over payload
+  uint16_t compute_crc(const uint8_t* data, size_t len); // Forward declaration for PIO compiler 
   uint16_t crc = compute_crc(payload.data(), payload.size());
 
   // Build full packet: length (2 bytes) + seq (2) + crc (2) + payload
@@ -563,6 +589,11 @@ void sendDataSerial() {
     Serial.print(",");
     Serial.print(raw_values[i][1]);
   }
+
+  // print NavX2 Packet
+  Serial.print(",");
+  navx.printCsv(Serial);
+
   Serial.println();
 }
 
@@ -676,6 +707,13 @@ void setup() {
     }
   }
 
+  // Initialize NavX2 engine and check connection
+  navx_ok = navx.begin();
+  if (hasSerial) {
+    Serial.print("NavX2 I2C: ");
+    Serial.println(navx_ok ? "connected" : "not found");
+  }
+
   // OTA setup
   // ArduinoOTA.setHostname("Hi-STIFFS_Nano");
   // ArduinoOTA.setPassword(ota_password);
@@ -697,6 +735,9 @@ void setup() {
 }
 
 void loop() {
+
+  // Poll and update NavX2 frame
+  navx.update();
 
   // State-specific actions
   switch (SerialState) {
