@@ -1,0 +1,28 @@
+Before every test: reset, pause (wait for light), calibration, pause (few seconds)
+After hitting 'start recording': wait a few seconds
+
+fast means count "one, one thousand, two." Start on one, middle at 'th', end on two.
+slow means count "one, one thousand, two, one thousand." Start on one, middle at two, end on "...and."
+
+Test in this order:
+
+
+Track 1 fast
+Track 1 fast
+Track 1 fast
+Track 2 fast
+Track 2 fast
+Track 2 fast
+Track 3 fast
+Track 3 fast
+Track 3 fast
+
+Track 1 slow
+Track 1 slow
+Track 1 slow
+Track 2 slow
+Track 2 slow
+Track 2 slow
+Track 3 slow
+Track 3 slow
+Track 3 slow
