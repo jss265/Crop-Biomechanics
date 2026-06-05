@@ -1,3 +1,5 @@
+// This code works with Pinout connections on Task Jounral
+
 #include <Arduino.h>
 #include <Adafruit_ISM330DHCX.h>
 #include <Adafruit_LIS3MDL.h>
@@ -26,18 +28,16 @@ void setup() {
   delay(1000);
 
   // Initialize sensors using SPI + CS pin
-  imu.begin_SPI(IMU_CS);
-  //   if (!imu.begin_SPI(IMU_CS)) {
-  //     Serial.println("Failed to find ISM330DHCX chip");
-  //     while (1) delay(10);
-  //   }
-  mag.begin_SPI(MAG_CS);
-  //   if (!mag.begin_SPI(MAG_CS)) {
-  //     Serial.println("Failed to find LIS3MDL chip");
-  //     while (1) delay(10);
-  //   }
+  if (!mag.begin_SPI(MAG_CS)) {
+    Serial.println("Failed to find LIS3MDL chip");
+    while (1) delay(10);
+  }
+  if (!imu.begin_SPI(IMU_CS)) {
+    Serial.println("Failed to find ISM330DHCX chip");
+    while (1) delay(10);
+  }
 
-  //   Serial.println("Both sensors found!");
+  Serial.println("Both sensors found!");
 
   // === IMU Configuration (using adafruit_lsm6ds) ===
   imu.setAccelDataRate(LSM6DS_RATE_104_HZ);
