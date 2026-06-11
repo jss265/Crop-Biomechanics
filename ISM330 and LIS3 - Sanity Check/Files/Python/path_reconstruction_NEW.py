@@ -36,14 +36,6 @@ def plot_reference_paths():
         plt.tight_layout()
         plt.show()
 
-def condition_IMU_signal(t, ax, ay, az):
-    # Remove static bias (mean of first 0.5 s)
-    static_mask = t < 0.5
-    ax -= ax[static_mask].mean()
-    ay -= ay[static_mask].mean()
-    az -= az[static_mask].mean()
-    return ax, ay, az
-
 def reconstruct_path(imu_path, mag_path):
     # Load CSVs (row 0 is metadata, row 1 is header)
     imu = pd.read_csv(imu_path, skiprows=1)
@@ -57,13 +49,19 @@ def reconstruct_path(imu_path, mag_path):
     ay = imu["Accel_Y_raw"].values * ACCEL_SCALE_MG_PER_LSB * 1e-3 * GRAVITY_M_S2
     az = imu["Accel_Z_raw"].values * ACCEL_SCALE_MG_PER_LSB * 1e-3 * GRAVITY_M_S2
 
-    # Condition the signal
-    ax, ay, az = condition_IMU_signal(t_imu, ax, ay, az)
+    # Remove static bias (mean of first 0.5 s)
+    static_mask = t_imu < 0.5
+    ax -= ax[static_mask].mean()
+    ay -= ay[static_mask].mean()
+    az -= az[static_mask].mean()
 
     # Double integrate: accel → velocity → position (in m, then convert to mm)
     vx = cumulative_trapezoid(ax, t_imu, initial=0)
     vy = cumulative_trapezoid(ay, t_imu, initial=0)
     vz = cumulative_trapezoid(az, t_imu, initial=0)
+
+    
+
     px = cumulative_trapezoid(vx, t_imu, initial=0) * 1000  # m → mm
     py = cumulative_trapezoid(vy, t_imu, initial=0) * 1000
     pz = cumulative_trapezoid(vz, t_imu, initial=0) * 1000
