@@ -49,7 +49,8 @@ def reconstruct_path(imu_path, mag_path):
     imu = pd.read_csv(imu_path, skiprows=1)
     mag = pd.read_csv(mag_path, skiprows=1)
 
-    t = imu["IMU_Time_sec"].values
+    t_imu = imu["IMU_Time_sec"].values
+    t_mag = mag["MAG_Time_sec"].values
 
     # Convert Signal from raw → m/s²
     ax = imu["Accel_X_raw"].values * ACCEL_SCALE_MG_PER_LSB * 1e-3 * GRAVITY_M_S2
@@ -57,15 +58,15 @@ def reconstruct_path(imu_path, mag_path):
     az = imu["Accel_Z_raw"].values * ACCEL_SCALE_MG_PER_LSB * 1e-3 * GRAVITY_M_S2
 
     # Condition the signal
-    ax, ay, az = condition_IMU_signal(t, ax, ay, az)
+    ax, ay, az = condition_IMU_signal(t_imu, ax, ay, az)
 
     # Double integrate: accel → velocity → position (in m, then convert to mm)
-    vx = cumulative_trapezoid(ax, t, initial=0)
-    vy = cumulative_trapezoid(ay, t, initial=0)
-    vz = cumulative_trapezoid(az, t, initial=0)
-    px = cumulative_trapezoid(vx, t, initial=0) * 1000  # m → mm
-    py = cumulative_trapezoid(vy, t, initial=0) * 1000
-    pz = cumulative_trapezoid(vz, t, initial=0) * 1000
+    vx = cumulative_trapezoid(ax, t_imu, initial=0)
+    vy = cumulative_trapezoid(ay, t_imu, initial=0)
+    vz = cumulative_trapezoid(az, t_imu, initial=0)
+    px = cumulative_trapezoid(vx, t_imu, initial=0) * 1000  # m → mm
+    py = cumulative_trapezoid(vy, t_imu, initial=0) * 1000
+    pz = cumulative_trapezoid(vz, t_imu, initial=0) * 1000
 
     return px, py, pz
 
@@ -89,30 +90,30 @@ def plot_comparison(reference, date, time):
 
     ref_z = np.zeros(len(ref))
 
-    # --- Plot 2D ---
-    fig2, ax2 = plt.subplots()
-    ax2.plot(ref["X(mm)"], ref["Y(mm)"], label=f"Reference: {reference}", linewidth=2)
-    ax2.plot(imu_x, imu_y, label="IMU (double integration)", linewidth=1.5, linestyle="--")
-    ax2.set_xlabel("X (mm)")
-    ax2.set_ylabel("Y (mm)")
-    ax2.set_title(f"Path Comparison (2D) — {reference} vs IMU ({tag})")
-    ax2.set_aspect("equal")
-    ax2.legend()
-    fig2.tight_layout()
-
     # --- Plot 3D ---
-    fig3 = plt.figure()
-    ax3 = fig3.add_subplot(111, projection="3d")
-    ax3.plot(ref["X(mm)"], ref["Y(mm)"], ref_z, label=f"Reference: {reference}", linewidth=2)
-    ax3.plot(imu_x, imu_y, imu_z, label="IMU (double integration)", linewidth=1.5, linestyle="--")
-    ax3.set_xlabel("X (mm)")
-    ax3.set_ylabel("Y (mm)")
-    ax3.set_zlabel("Z (mm)")
-    ax3.set_title(f"Path Comparison (3D) — {reference} vs IMU ({tag})")
-    ax3.set_box_aspect([1, 1, 1])
-    ax3.view_init(elev=90, azim=-90)
-    ax3.legend()
-    fig3.tight_layout()
+    fig_3d = plt.figure()
+    ax_3d = fig_3d.add_subplot(111, projection="3d")
+    ax_3d.plot(ref["X(mm)"], ref["Y(mm)"], ref_z, label=f"Reference: {reference}", linewidth=2)
+    ax_3d.plot(imu_x, imu_y, imu_z, label="IMU (double integration)", linewidth=1.5, linestyle="--")
+    ax_3d.set_xlabel("X (mm)")
+    ax_3d.set_ylabel("Y (mm)")
+    ax_3d.set_zlabel("Z (mm)")
+    ax_3d.set_title(f"Path Comparison (3D) — {reference} vs IMU ({tag})")
+    ax_3d.set_box_aspect([1, 1, 1])
+    ax_3d.view_init(elev=90, azim=-90)
+    ax_3d.legend()
+    fig_3d.tight_layout()
+
+    # --- Plot 2D ---
+    fig_2d, ax_2d = plt.subplots()
+    ax_2d.plot(ref["X(mm)"], ref["Y(mm)"], label=f"Reference: {reference}", linewidth=2)
+    ax_2d.plot(imu_x, imu_y, label="IMU (double integration)", linewidth=1.5, linestyle="--")
+    ax_2d.set_xlabel("X (mm)")
+    ax_2d.set_ylabel("Y (mm)")
+    ax_2d.set_title(f"Path Comparison (2D) — {reference} vs IMU ({tag})")
+    ax_2d.set_aspect("equal")
+    ax_2d.legend()
+    fig_2d.tight_layout()
 
     plt.show()
 
