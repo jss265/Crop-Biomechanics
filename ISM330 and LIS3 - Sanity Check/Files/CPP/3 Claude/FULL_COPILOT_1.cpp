@@ -314,7 +314,7 @@ void setup() {
   pinMode(IMU_CS_PIN, OUTPUT);  digitalWrite(IMU_CS_PIN, HIGH);
   pinMode(MAG_CS_PIN, OUTPUT);  digitalWrite(MAG_CS_PIN, HIGH);
 
-  SPI.begin();   // Nano ESP32 default: SCK=D13, MISO=D12, MOSI=D11
+  SPI.begin(13, 11, 12);   // Nano ESP32 default: SCK=D13, MISO=D12, MOSI=D11
 
   if (!initImu()) { Serial.println("IMU init failed - halting"); while (1) delay(1000); }
   if (!initMag()) { Serial.println("MAG init failed - halting"); while (1) delay(1000); }
