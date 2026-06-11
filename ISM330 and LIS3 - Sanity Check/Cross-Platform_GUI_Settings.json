@@ -1,0 +1,33 @@
+{
+  "ui_preferences": {
+    "independent_plots": false,
+    "detect_screen_size": true,
+    "screen_width": 1920
+  },
+  "hardware_config": {
+    "adc_config": "Analog-to-Digital Converter: ADS1220, Mode: Turbo, Data Rate: DR_90SPS, Analog Excitation/Reference Voltage: 5.1V +/-2mV",
+    "daq_config": "DAQ Microcontroller: Arduino Nano ESP32, ID: Hi-STIFFS_Nano_01, CPU Clock: 240MHz, Cores: 2, Data-stream Connection: Wi-Fi"
+  },
+  "sensors": [],
+  "test_config": {
+    "custom_test_types": [],
+    "parameters_by_type": {}
+  },
+  "session_state": {
+    "last_num_sensors": 5,
+    "last_labels": [
+      "A",
+      "B",
+      "C",
+      "D",
+      "E"
+    ],
+    "last_sns": [],
+    "last_note": "First test with ISM330/LIS3",
+    "last_test_type": "Demo",
+    "last_test_number": 1,
+    "last_test_rest": "",
+    "last_probe_height": 0.785,
+    "last_speed": "25 ft/min"
+  }
+}

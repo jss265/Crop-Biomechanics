@@ -114,25 +114,63 @@
 #include <SPI.h>
 #include <WiFi.h>       // For WiFi Station mode
 #include <ArduinoOTA.h> // For Over-The-Air updates
-#include <deque>        // For queuing packets to batch sends
 #include <vector>       // For storing binary packet data
+#include "esp_timer.h"  // For esp_timer_get_time() 64-bit microsecond timestamps
+#include "ImuMagSpi.h"  // ISM330DHCX + LIS3MDL FeatherWing driver (replaces NavX)
 
 #define FULL_SCALE (1LL << 23) // 2^23 for 24-bit signed scaling - retained for reference, though not used in raw output
-#define A_DRDY_PIN 10
-#define A_CS_PIN 9
-#define B_DRDY_PIN 8
-#define B_CS_PIN 7
-#define C_DRDY_PIN 6
-#define C_CS_PIN 5
-#define D_DRDY_PIN 4
-#define D_CS_PIN 3
-#define E_DRDY_PIN 2
-#define E_CS_PIN A6
+#define A_DRDY_PIN 9
+#define A_CS_PIN 10
+#define B_DRDY_PIN 7
+#define B_CS_PIN 8
+#define C_DRDY_PIN 5
+#define C_CS_PIN 6
+#define D_DRDY_PIN 3
+#define D_CS_PIN 4
+#define E_DRDY_PIN A6
+#define E_CS_PIN 2
+
+const int SPI_SCK  = 13;   // default D13
+const int SPI_MISO = 11;   // default D12 (CIPO)
+const int SPI_MOSI = 12;   // default D11 (COPI)
+
+// ISM330DHCX + LIS3MDL FeatherWing pins (shares the SPI bus with the ADS1220 chips)
+#define IMU_CS_PIN   A0   // ISM330DHCX chip select
+#define MAG_CS_PIN   A1   // LIS3MDL chip select
+#define IMU_INT_PIN  A2   // ISM330DHCX INT1 (accel/gyro data-ready)
+#define MAG_DRDY_PIN A3   // LIS3MDL DRDY
 
 const int MAX_SENSORS = 5;     // Maximum possible sensors (A to E)
-const int NUM_SENSORS = 5;     // Set to 1-5 to use the first N sensors from all_configs below.
+const int NUM_SENSORS = 3;     // Set to 1-5 to use the first N sensors from all_configs below.
 const uint8_t dr_code = DR_330SPS;  // Data Rate value. In turbo, value is for pairs/sec. In normal, value is for samples/sec
-const SPISettings spi_settings(2000000, MSBFIRST, SPI_MODE1);
+const SPISettings spi_settings(4000000, MSBFIRST, SPI_MODE1);  // ADS1220 bus speed (4 MHz; IMU/Mag use 8 MHz via ImuMagSpi)
+
+// ---- Wire packet definitions (sent as [type][packed struct]) ----------------
+// Records are produced by the ADS read tasks and the ImuMagSpi tasks, then
+// concatenated into a single batch and wrapped in one [len][seq][crc] frame.
+enum PacketType : uint8_t {
+  PKT_IMU = 1,
+  PKT_MAG = 2,
+  PKT_ADS = 3
+};
+
+#pragma pack(push, 1)
+struct AdsPacket {
+  uint64_t ts_us;
+  uint8_t  adc_id;   // A=0, B=1, C=2, D=3, E=4
+  int32_t  ch1;
+  int32_t  ch2;
+};
+struct MagPacket {
+  uint64_t ts_us;
+  int16_t  mx, my, mz;
+};
+struct ImuPacket {
+  uint64_t ts_us;
+  int16_t  ax, ay, az;
+  int16_t  gx, gy, gz;
+};
+#pragma pack(pop)
 
 // WiFi access point to connect to (host's AP)
 const char* ssid = "Hi-STIFFS_Host";       // Host WiFi network name (SSID) - choose something unique
@@ -167,18 +205,22 @@ SensorConfig all_configs[MAX_SENSORS] = {
 };
 
 Protocentral_ADS1220 adcs[MAX_SENSORS];             // ADC objects from library
-int32_t raw_values[MAX_SENSORS][2];                 // [sensor][channel]: raw 24-bit signed ADC values; 0=ch1 (AIN0-1), 1=ch2 (AIN2-3)
-unsigned long timestamps[MAX_SENSORS] = {100000.0};              // Per-chip timestamps for each pair
+int32_t raw_values[MAX_SENSORS][2];                 // [sensor][channel]: scratch for ch1 between DRDY events (read by ADS tasks)
 uint8_t current_channels[MAX_SENSORS] = {0};        // Indicates which MUX channel to read from for an ADS1220 module
-volatile uint8_t ready_mask = 0;                    // Bitmask tracking ready sensors (bit i set to (1) when sensor i pair is complete)
-unsigned long time_init;                            // t=0 of datastream. Set each time connection initiates datastream
 const unsigned long WiFi_CHECK_INTERVAL_MS = 1000;  // 1 Hz
 const unsigned long WiFi_RETRY_DELAY_MS = 5000;     // Retry connection every 5s if failed
 
-// Packet queue for batching: Stores binary packets ready to send
-std::deque<std::vector<uint8_t>> packet_queue;      // Queue of binary packets (each vector is one full sensor set)
-uint16_t seq_num = 0;                               // Sequence number for packets, increments per packet
+// ADS1220 deferred-read plumbing: short ISRs timestamp + notify; tasks do the SPI read.
+volatile int64_t g_adsIsrTs[MAX_SENSORS] = {0};        // Per-sensor DRDY timestamp (us) captured in ISR
+TaskHandle_t     g_adsTask[MAX_SENSORS]  = {nullptr};  // Per-sensor read task handle
+QueueHandle_t    g_adsQueue              = nullptr;    // Queue of completed AdsPacket records
+const size_t     ADS_QUEUE_DEPTH         = 128;        // AdsPacket records buffered before drops
+
+uint16_t seq_num = 0;                               // Sequence number for batch frames, increments per frame
 unsigned long last_batch_send = 0;                  // Timestamp of last batch send
+
+// Forward declaration (used by the batch sender before its definition below)
+uint16_t compute_crc(const uint8_t* data, size_t len);
 
 // FSM States
 enum State_Serial {
@@ -196,173 +238,85 @@ State_WiFi WiFiState = CONNECTING;
 // Global flag for Serial presence, set in setup
 bool hasSerial = false;
 
-// Interrupt handlers for each possible sensor (0 to 4, corresponding to A to E).
-// These are defined as separate functions to ensure compatibility with attachInterrupt on ESP32.
-// We define all 5 even if NUM_SENSORS < 5, but only attach the ones we use.
-// The IRAM_ATTR attribute ensures they can be called from interrupt context efficiently.
-// All read functionality must be internal to each interrupt (no external SPI-reading functions or global reads).
-// Write functionality can be to external and using external functions.
+// ---- ADS1220 deferred-read tasks --------------------------------------------
+// The DRDY ISRs are intentionally tiny: they only timestamp the event and notify
+// the matching read task. The task performs the SPI read off interrupt context,
+// switches the MUX, and (after the second channel) publishes an AdsPacket.
+void adsReadTask(void* arg) {
+  const int i = (int)(intptr_t)arg;
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    int64_t ts = g_adsIsrTs[i];
+
+    // Read the 24-bit conversion result over SPI
+    SPI.beginTransaction(spi_settings);
+    digitalWrite(all_configs[i].cs_pin, LOW);
+    delayMicroseconds(1);
+    byte SPI_Buf[3];
+    SPI_Buf[0] = SPI.transfer(0);
+    SPI_Buf[1] = SPI.transfer(0);
+    SPI_Buf[2] = SPI.transfer(0);
+    delayMicroseconds(1);
+    digitalWrite(all_configs[i].cs_pin, HIGH);
+    SPI.endTransaction();
+
+    long bits24 = (long)SPI_Buf[0] << 16 | (long)SPI_Buf[1] << 8 | SPI_Buf[2];
+    int32_t val = (bits24 << 8) >> 8;  // Sign-extend 24-bit to 32-bit
+
+    if (current_channels[i] == 0) {
+      raw_values[i][0] = val;                      // Stash channel 1
+      adcs[i].select_mux_channels(MUX_AIN2_AIN3);
+      current_channels[i] = 1;
+    } else {
+      adcs[i].select_mux_channels(MUX_AIN0_AIN1);
+      current_channels[i] = 0;
+
+      // Pair complete: publish one AdsPacket (timestamp taken at channel-2 DRDY)
+      AdsPacket pk;
+      pk.ts_us  = (uint64_t)ts;
+      pk.adc_id = (uint8_t)(all_configs[i].id - 'A');  // A=0, C=2, E=4 — matches Python adcid_to_idx;
+      pk.ch1    = raw_values[i][0];
+      pk.ch2    = val;
+      xQueueSend(g_adsQueue, &pk, 0);
+    }
+  }
+}
+
+// Tiny DRDY ISRs: timestamp + notify the matching read task. No SPI in interrupt context.
 void IRAM_ATTR handleDrdyA() {
-  const int i = 0;                          // Array index of sensor
-  unsigned long interrupt_time = micros();  // Record the time the ADC value was reported by DRDY interrupt pin. 
-                                            // Technically the time when the interrupt is processed, as interrupts on same core of same priority form queue
-  // Open SPI with sensor's ADS1220 chip/module
-  SPI.beginTransaction(spi_settings);       // Get SPI open with settings
-  digitalWrite(A_CS_PIN, LOW);              // Select particular sensor (cs='chip select')
-  delayMicroseconds(1);                     // Allow ADS1220 module to accept connection (50ns on datasheet)
-  // Retrieve 3 byte (24-bit) ADC result
-  byte SPI_Buf[3];                          // temporary local buffer to work with raw result before storing integer value
-  SPI_Buf[0] = SPI.transfer(0);             // Send dummy 0x00 byte on MOSI and receive one conversion byte on MISO
-  SPI_Buf[1] = SPI.transfer(0);
-  SPI_Buf[2] = SPI.transfer(0);
-  delayMicroseconds(1);                     // Allow communication to finish
-  // Close SPI
-  digitalWrite(A_CS_PIN, HIGH);             // Release sensor from SPI
-  SPI.endTransaction();                     // Release Nano's SPI bus
-
-  long bits24 = (long)SPI_Buf[0] << 16 | (long)SPI_Buf[1] << 8 | SPI_Buf[2]; // Assemble 3 bytes into single 24-bit object (using 32-bit datatype)
-  int32_t val = (bits24 << 8) >> 8;                                          // Sign-extend 24-bit to 32-bit. Copy sign bit 23 to bits 31-24 
-
-  // ADS1220 can only store one value, so manually switch and track between channels
-  if (current_channels[i] == 0) {
-    raw_values[i][0] = val;
-    adcs[i].select_mux_channels(MUX_AIN2_AIN3);
-    current_channels[i] = 1;
-  } 
-  else {
-    raw_values[i][1] = val;
-    adcs[i].select_mux_channels(MUX_AIN0_AIN1);
-    current_channels[i] = 0;
-
-    // When second channel is read, record time and mark sensor's bit in bitmask as ready (1)
-    timestamps[i] = interrupt_time - time_init;
-    ready_mask |= (1 << i);
-  }
+  g_adsIsrTs[0] = esp_timer_get_time();
+  BaseType_t hpw = pdFALSE;
+  vTaskNotifyGiveFromISR(g_adsTask[0], &hpw);
+  if (hpw) portYIELD_FROM_ISR();
 }
-
 void IRAM_ATTR handleDrdyB() {
-  const int i = 1;
-  unsigned long interrupt_time = micros();
-  SPI.beginTransaction(spi_settings);
-  digitalWrite(B_CS_PIN, LOW);
-  delayMicroseconds(1);
-  byte SPI_Buf[3];
-  SPI_Buf[0] = SPI.transfer(0);
-  SPI_Buf[1] = SPI.transfer(0);
-  SPI_Buf[2] = SPI.transfer(0);
-  delayMicroseconds(1);
-  digitalWrite(B_CS_PIN, HIGH);
-  SPI.endTransaction();
-
-  long bits24 = (long)SPI_Buf[0] << 16 | (long)SPI_Buf[1] << 8 | SPI_Buf[2];
-  int32_t val = (bits24 << 8) >> 8;
-
-  if (current_channels[i] == 0) {
-    raw_values[i][0] = val;
-    adcs[i].select_mux_channels(MUX_AIN2_AIN3);
-    current_channels[i] = 1;
-  } 
-  else {
-    raw_values[i][1] = val;
-    adcs[i].select_mux_channels(MUX_AIN0_AIN1);
-    current_channels[i] = 0;
-    timestamps[i] = interrupt_time - time_init;
-    ready_mask |= (1 << i);
-  }
+  g_adsIsrTs[1] = esp_timer_get_time();
+  BaseType_t hpw = pdFALSE;
+  vTaskNotifyGiveFromISR(g_adsTask[1], &hpw);
+  if (hpw) portYIELD_FROM_ISR();
 }
-
 void IRAM_ATTR handleDrdyC() {
-  const int i = 2;
-  unsigned long interrupt_time = micros();
-  SPI.beginTransaction(spi_settings);
-  digitalWrite(C_CS_PIN, LOW);
-  delayMicroseconds(1);
-  byte SPI_Buf[3];
-  SPI_Buf[0] = SPI.transfer(0);
-  SPI_Buf[1] = SPI.transfer(0);
-  SPI_Buf[2] = SPI.transfer(0);
-  delayMicroseconds(1);
-  digitalWrite(C_CS_PIN, HIGH);
-  SPI.endTransaction();
-
-  long bits24 = (long)SPI_Buf[0] << 16 | (long)SPI_Buf[1] << 8 | SPI_Buf[2];
-  int32_t val = (bits24 << 8) >> 8;
-
-  if (current_channels[i] == 0) {
-    raw_values[i][0] = val;
-    adcs[i].select_mux_channels(MUX_AIN2_AIN3);
-    current_channels[i] = 1;
-  } 
-  else {
-    raw_values[i][1] = val;
-    adcs[i].select_mux_channels(MUX_AIN0_AIN1);
-    current_channels[i] = 0;
-    timestamps[i] = interrupt_time - time_init;
-    ready_mask |= (1 << i);
-  }
+  g_adsIsrTs[2] = esp_timer_get_time();
+  BaseType_t hpw = pdFALSE;
+  vTaskNotifyGiveFromISR(g_adsTask[2], &hpw);
+  if (hpw) portYIELD_FROM_ISR();
 }
-
 void IRAM_ATTR handleDrdyD() {
-  const int i = 3;
-  unsigned long interrupt_time = micros();
-  SPI.beginTransaction(spi_settings);
-  digitalWrite(D_CS_PIN, LOW);
-  delayMicroseconds(1);
-  byte SPI_Buf[3];
-  SPI_Buf[0] = SPI.transfer(0);
-  SPI_Buf[1] = SPI.transfer(0);
-  SPI_Buf[2] = SPI.transfer(0);
-  delayMicroseconds(1);
-  digitalWrite(D_CS_PIN, HIGH);
-  SPI.endTransaction();
-
-  long bits24 = (long)SPI_Buf[0] << 16 | (long)SPI_Buf[1] << 8 | SPI_Buf[2];
-  int32_t val = (bits24 << 8) >> 8;
-
-  if (current_channels[i] == 0) {
-    raw_values[i][0] = val;
-    adcs[i].select_mux_channels(MUX_AIN2_AIN3);
-    current_channels[i] = 1;
-  } 
-  else {
-    raw_values[i][1] = val;
-    adcs[i].select_mux_channels(MUX_AIN0_AIN1);
-    current_channels[i] = 0;
-    timestamps[i] = interrupt_time - time_init;
-    ready_mask |= (1 << i);
-  }
+  g_adsIsrTs[3] = esp_timer_get_time();
+  BaseType_t hpw = pdFALSE;
+  vTaskNotifyGiveFromISR(g_adsTask[3], &hpw);
+  if (hpw) portYIELD_FROM_ISR();
 }
-
 void IRAM_ATTR handleDrdyE() {
-  const int i = 4;
-  unsigned long interrupt_time = micros();
-  SPI.beginTransaction(spi_settings);
-  digitalWrite(E_CS_PIN, LOW);
-  delayMicroseconds(1);
-  byte SPI_Buf[3];
-  SPI_Buf[0] = SPI.transfer(0);
-  SPI_Buf[1] = SPI.transfer(0);
-  SPI_Buf[2] = SPI.transfer(0);
-  delayMicroseconds(1);
-  digitalWrite(E_CS_PIN, HIGH);
-  SPI.endTransaction();
-
-  long bits24 = (long)SPI_Buf[0] << 16 | (long)SPI_Buf[1] << 8 | SPI_Buf[2];
-  int32_t val = (bits24 << 8) >> 8;
-
-  if (current_channels[i] == 0) {
-    raw_values[i][0] = val;
-    adcs[i].select_mux_channels(MUX_AIN2_AIN3);
-    current_channels[i] = 1;
-  } 
-  else {
-    raw_values[i][1] = val;
-    adcs[i].select_mux_channels(MUX_AIN0_AIN1);
-    current_channels[i] = 0;
-    timestamps[i] = interrupt_time - time_init;
-    ready_mask |= (1 << i);
-  }
+  g_adsIsrTs[4] = esp_timer_get_time();
+  BaseType_t hpw = pdFALSE;
+  vTaskNotifyGiveFromISR(g_adsTask[4], &hpw);
+  if (hpw) portYIELD_FROM_ISR();
 }
+
+// ImuMagSpi DRDY ISRs: timestamp + hand off to the library's tasks.
+void IRAM_ATTR imuDrdyISR() { ImuMagSpi::onImuDrdyFromIsr(esp_timer_get_time()); }
+void IRAM_ATTR magDrdyISR() { ImuMagSpi::onMagDrdyFromIsr(esp_timer_get_time()); }
 
 // Broadcast a command to all active sensors
 void broadcast_command(uint8_t cmd) {
@@ -393,7 +347,7 @@ void enableADCInterrupts() {
   }
 }
 
-// Reset and reconfigure all ADCs, reset time_init
+// Reset and reconfigure all ADCs
 void initializeADCs() {
   // Broadcast RESET to all active sensors
   broadcast_command(RESET);
@@ -450,10 +404,9 @@ void initializeADCs() {
     }
   }
 
-  // Set time=0 for datastream after letting ADS1220 modules stabilize
+  // Enable DRDY interrupts after letting ADS1220 modules stabilize
   enableADCInterrupts();
   delay(50);
-  time_init = micros();
 }
 
 // Handle OTA updates (called only in non-CONNECTED states)
@@ -461,106 +414,96 @@ void handleOTA() {
   ArduinoOTA.handle();
 }
 
-// Check if all data pairs are ready for this cycle
-bool checkDataReady() {
-  return true;
-  uint8_t all_ready_mask = (1U << NUM_SENSORS) - 1;  // Local compile-time constant. Stored in CPU stack for compare, not created in and read from RAM.
-  if (ready_mask == all_ready_mask) {
-    ready_mask = 0;   // reset all bits in the mask to 0
-    return true;
-  }
-  return false;
+// Append raw bytes to the batch buffer
+static inline void appendBytes(std::vector<uint8_t>& buf, const void* data, size_t n) {
+  const uint8_t* p = reinterpret_cast<const uint8_t*>(data);
+  buf.insert(buf.end(), p, p + n);
 }
 
-// Build a binary packet from current data and add to queue
-void queueDataPacket() {
-  // Calculate packet payload length: 1 byte ID + sensors * (4 ts + 4 raw1 + 4 raw2)
-  size_t payload_len = 1 + NUM_SENSORS * 12;
-
-  // Build payload separately
-  std::vector<uint8_t> payload;
-  payload.reserve(payload_len);
-
-  // Add nano_id as uint8_t
-  uint8_t nano_id = atoi(NANO_ID);
-  payload.push_back(nano_id);
-
-  // Per sensor: uint32_t ts_us, int32_t raw1, int32_t raw2
-  for (int i = 0; i < NUM_SENSORS; i++) {
-    uint32_t ts_us = (uint32_t)timestamps[i];  // Cast to 32-bit (matches ESP32 unsigned long)
-    const uint8_t* ts_ptr = reinterpret_cast<const uint8_t*>(&ts_us);
-    payload.insert(payload.end(), ts_ptr, ts_ptr + sizeof(uint32_t));
-
-    const uint8_t* raw1_ptr = reinterpret_cast<const uint8_t*>(&raw_values[i][0]);
-    payload.insert(payload.end(), raw1_ptr, raw1_ptr + sizeof(int32_t));
-
-    const uint8_t* raw2_ptr = reinterpret_cast<const uint8_t*>(&raw_values[i][1]);
-    payload.insert(payload.end(), raw2_ptr, raw2_ptr + sizeof(int32_t));
-  }
-
-  // Compute CRC over payload
-  uint16_t crc = compute_crc(payload.data(), payload.size());
-
-  // Build full packet: length (2 bytes) + seq (2) + crc (2) + payload
-  std::vector<uint8_t> packet;
-  packet.reserve(6 + payload_len);
-
-  // Length prefix (uint16_t, little-endian)
-  uint16_t length = static_cast<uint16_t>(payload_len);
-  packet.push_back(static_cast<uint8_t>(length & 0xFF));
-  packet.push_back(static_cast<uint8_t>((length >> 8) & 0xFF));
-
-  // Sequence number (uint16_t, little-endian)
-  packet.push_back(static_cast<uint8_t>(seq_num & 0xFF));
-  packet.push_back(static_cast<uint8_t>((seq_num >> 8) & 0xFF));
-  seq_num++;  // Increment for next packet
-
-  // CRC (uint16_t, little-endian)
-  packet.push_back(static_cast<uint8_t>(crc & 0xFF));
-  packet.push_back(static_cast<uint8_t>((crc >> 8) & 0xFF));
-
-  // Append payload
-  packet.insert(packet.end(), payload.begin(), payload.end());
-
-  // Add to queue
-  packet_queue.push_back(std::move(packet));
-}
-
-// Send queued packets over persistent TCP
-bool sendQueuedDataTCP() {
+// Drain all sensor queues, build one batched frame, and send it over TCP.
+// Frame layout: [len:2][seq:2][crc:2][ (type:1 + packed struct) * N ]  (little-endian)
+bool buildAndSendBatch() {
   if (!client.connected()) {
     if (hasSerial) Serial.println("TCP not connected; skipping send");
     return false;
   }
 
-  bool sent_any = false;
-  while (!packet_queue.empty()) {
-    const auto& packet = packet_queue.front();
-    if (client.write(packet.data(), packet.size()) != packet.size()) {
-      if (hasSerial) Serial.println("Partial or failed packet send");
-      return false;  // Stop on error to avoid out-of-order
-    }
-    packet_queue.pop_front();
-    sent_any = true;
+  std::vector<uint8_t> payload;
+
+  // ADS records (packed struct copied straight to the wire)
+  AdsPacket ads;
+  while (g_adsQueue && xQueueReceive(g_adsQueue, &ads, 0) == pdTRUE) {
+    payload.push_back(PKT_ADS);
+    appendBytes(payload, &ads, sizeof(ads));
   }
 
-  if (sent_any) {
-    client.flush();  // Ensure data is sent
+  // IMU records (copy lib sample into the packed wire struct)
+  QueueHandle_t imuQ = ImuMagSpi::getImuQueue();
+  ImuMagSpi::ImuSample is;
+  while (imuQ && xQueueReceive(imuQ, &is, 0) == pdTRUE) {
+    ImuPacket pk;
+    pk.ts_us = is.ts_us;
+    pk.ax = is.ax; pk.ay = is.ay; pk.az = is.az;
+    pk.gx = is.gx; pk.gy = is.gy; pk.gz = is.gz;
+    payload.push_back(PKT_IMU);
+    appendBytes(payload, &pk, sizeof(pk));
   }
+
+  // Mag records
+  QueueHandle_t magQ = ImuMagSpi::getMagQueue();
+  ImuMagSpi::MagSample ms;
+  while (magQ && xQueueReceive(magQ, &ms, 0) == pdTRUE) {
+    MagPacket pk;
+    pk.ts_us = ms.ts_us;
+    pk.mx = ms.mx; pk.my = ms.my; pk.mz = ms.mz;
+    payload.push_back(PKT_MAG);
+    appendBytes(payload, &pk, sizeof(pk));
+  }
+
+  if (payload.empty()) return true;  // Nothing to send this cycle
+
+  uint16_t crc = compute_crc(payload.data(), payload.size());
+
+  std::vector<uint8_t> frame;
+  frame.reserve(6 + payload.size());
+
+  // Length prefix (uint16_t, little-endian)
+  uint16_t length = static_cast<uint16_t>(payload.size());
+  frame.push_back(static_cast<uint8_t>(length & 0xFF));
+  frame.push_back(static_cast<uint8_t>((length >> 8) & 0xFF));
+
+  // Sequence number (uint16_t, little-endian)
+  frame.push_back(static_cast<uint8_t>(seq_num & 0xFF));
+  frame.push_back(static_cast<uint8_t>((seq_num >> 8) & 0xFF));
+  seq_num++;
+
+  // CRC (uint16_t, little-endian)
+  frame.push_back(static_cast<uint8_t>(crc & 0xFF));
+  frame.push_back(static_cast<uint8_t>((crc >> 8) & 0xFF));
+
+  // Payload
+  frame.insert(frame.end(), payload.begin(), payload.end());
+
+  if (client.write(frame.data(), frame.size()) != frame.size()) {
+    if (hasSerial) Serial.println("Partial or failed frame send");
+    return false;
+  }
+  client.flush();
   return true;
 }
 
-// Send individual packet over wired serial, if connected
-void sendDataSerial() {
-  for (int i = 0; i < NUM_SENSORS; i++) {
-    if (i > 0) Serial.print(",");
-    Serial.print(timestamps[i] / 1000000.0, 6);
-    Serial.print(",");
-    Serial.print(raw_values[i][0]);
-    Serial.print(",");
-    Serial.print(raw_values[i][1]);
-  }
-  Serial.println();
+// Print a lightweight diagnostic line over serial (rate-limited to ~1 Hz)
+void printDiagnostics() {
+  static unsigned long lastPrint = 0;
+  unsigned long now = millis();
+  if (now - lastPrint < 1000) return;
+  lastPrint = now;
+  Serial.print("IMU samples="); Serial.print(ImuMagSpi::getImuSampleCount());
+  Serial.print(" dropped="); Serial.print(ImuMagSpi::getImuDroppedCount());
+  Serial.print(" | MAG samples="); Serial.print(ImuMagSpi::getMagSampleCount());
+  Serial.print(" dropped="); Serial.print(ImuMagSpi::getMagDroppedCount());
+  Serial.print(" | ADS queued=");
+  Serial.println(g_adsQueue ? (unsigned)uxQueueMessagesWaiting(g_adsQueue) : 0);
 }
 
 // Attempt to connect to host AP
@@ -569,13 +512,16 @@ void connectToHost() {
   unsigned long now = millis();
   if (now - lastRetry >= WiFi_RETRY_DELAY_MS) {
     lastRetry = now;
-    if (hasSerial) Serial.println(" "); Serial.print("Connecting to "); Serial.println(ssid);
+    if (hasSerial) { Serial.print("Connecting to "); Serial.println(ssid); }
 
+    // Disconnect from any previous AP before retrying (keep radio on).
+    WiFi.disconnect(false);
+    delay(100);
     WiFi.begin(ssid, password);
     unsigned long startAttempt = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 8000) {
       delay(500);
-      if (hasSerial) Serial.print("."); Serial.print(WiFi.status());
+      if (hasSerial) { Serial.print("."); Serial.print(WiFi.status()); }
     }
 
     if (WiFi.status() == WL_CONNECTED) {
@@ -590,9 +536,12 @@ void connectToHost() {
       if (client.connect(host_ip, host_port)) {
         if (hasSerial) Serial.println("Persistent TCP connected to host");
         WiFiState = CONNECTED;
-        initializeADCs();  // Reset ADCs and time for new session
-        ready_mask = 0;
-        packet_queue.clear();  // Clear any stale packets
+        initializeADCs();  // Reset ADCs for new session
+        // Drop any stale samples buffered while disconnected
+        if (g_adsQueue) xQueueReset(g_adsQueue);
+        if (ImuMagSpi::getImuQueue()) xQueueReset(ImuMagSpi::getImuQueue());
+        if (ImuMagSpi::getMagQueue()) xQueueReset(ImuMagSpi::getMagQueue());
+        seq_num = 0;
         ArduinoOTA.end();
         if (hasSerial) Serial.println("Entering CONNECTED state.");
       } 
@@ -653,9 +602,58 @@ void setup() {
   }
 
   // SPI init
-  SPI.begin();
+  SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
 
-  // WiFi Station mode setup
+  // ---- ADS1220 deferred-read queue + per-sensor tasks (pinned to core 1) ----
+  g_adsQueue = xQueueCreate(ADS_QUEUE_DEPTH, sizeof(AdsPacket));
+  if (!g_adsQueue && hasSerial) Serial.println("ERROR: failed to create ADS queue");
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    xTaskCreatePinnedToCore(adsReadTask, "ads_rd", 3072,
+                            (void*)(intptr_t)i, configMAX_PRIORITIES - 2,
+                            &g_adsTask[i], 1);
+  }
+
+  // ---- ISM330DHCX + LIS3MDL bring-up (shares the SPI bus at 8 MHz) ----
+  {
+    ImuMagSpi::Config imuCfg;
+    imuCfg.spi         = &SPI;
+    imuCfg.spiSettings = SPISettings(8000000, MSBFIRST, SPI_MODE3);
+    imuCfg.imuCsPin    = IMU_CS_PIN;
+    imuCfg.magCsPin    = MAG_CS_PIN;
+    imuCfg.magIntPin      = MAG_DRDY_PIN;
+    imuCfg.taskCore       = 1;
+    imuCfg.imuQueueDepth  = 512;  // ~77 ms headroom at 6.66 kHz
+    ImuMagSpi::begin(imuCfg);
+
+    bool imuOk = ImuMagSpi::initImu();
+    bool magOk = ImuMagSpi::initMag();
+    if (hasSerial) {
+      Serial.print("ISM330DHCX init: "); Serial.println(imuOk ? "OK" : "FAILED");
+      Serial.print("LIS3MDL init: ");    Serial.println(magOk ? "OK" : "FAILED");
+    }
+
+    // Create the library's tasks and prime the LIS3MDL DRDY line, THEN attach
+    // ISRs (the library task handles must exist before any DRDY interrupt fires).
+    // The LIS3MDL DRDY is level-triggered, so these stay attached for the whole
+    // session; stale samples are dropped via xQueueReset on each (re)connect.
+    ImuMagSpi::startTasks();
+    pinMode(IMU_INT_PIN, INPUT);
+    pinMode(MAG_DRDY_PIN, INPUT);
+    attachInterrupt(digitalPinToInterrupt(IMU_INT_PIN), imuDrdyISR, RISING);
+    attachInterrupt(digitalPinToInterrupt(MAG_DRDY_PIN), magDrdyISR, RISING);
+
+    // If DRDY was already HIGH when we attached RISING, the edge was missed and
+    // the magTask will never wake (LIS3MDL holds DRDY high until data is read).
+    // Give the pin a moment to settle, then kick the task if still HIGH.
+    delayMicroseconds(200);
+    if (hasSerial) {
+      Serial.print("MAG DRDY pin (A3) state after ISR attach: ");
+      Serial.println(digitalRead(MAG_DRDY_PIN) ? "HIGH (kicking mag task)" : "LOW (ok)");
+    }
+    if (digitalRead(MAG_DRDY_PIN) == HIGH) {
+      ImuMagSpi::kickMag();
+    }
+  }
   if (hasSerial) {
     Serial.println("Starting station mode. Arduino is WiFi client looking for following network...");
     Serial.print("SSID: "); Serial.print(ssid);
@@ -709,21 +707,17 @@ void loop() {
       
       switch (WiFiState) {
         case CONNECTED: {
-          if (checkDataReady()) {
-            queueDataPacket();  // Build and queue binary packet
-          }
-          // Check if time to send batch
           unsigned long now = millis();
           if (now - last_batch_send >= BATCH_SEND_INTERVAL_MS) {
-            sendQueuedDataTCP();
+            buildAndSendBatch();
             last_batch_send = now;
           }
           monitorConnection();
         } break;
         case CONNECTING: {
           disableADCInterrupts();
-          handleOTA();
           connectToHost();
+          delay(10);  // yield to idle task — prevents TWDT reset during retry gap
         } break;
 
       }
@@ -733,22 +727,18 @@ void loop() {
 
       switch (WiFiState) {
         case CONNECTED: { // Connected, do not allow OTA updates and send datastream to host 
-          if (checkDataReady()) {
-            queueDataPacket();  // Build and queue binary packet
-            sendDataSerial();   // Also send over serial for debugging
-          }
-          // Check if time to send batch
           unsigned long now = millis();
           if (now - last_batch_send >= BATCH_SEND_INTERVAL_MS) {
-            sendQueuedDataTCP();
+            buildAndSendBatch();
             last_batch_send = now;
           }
+          printDiagnostics();  // ~1 Hz serial diagnostics
           monitorConnection();
         } break;        
         case CONNECTING: { // Not connected, but attempt connection and allow OTA updates
           disableADCInterrupts();
-          handleOTA();
           connectToHost();
+          delay(10);  // yield to idle task — prevents TWDT reset during retry gap
         } break;
       }
     } break;
