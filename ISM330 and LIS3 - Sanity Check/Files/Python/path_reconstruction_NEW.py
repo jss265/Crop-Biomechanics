@@ -98,8 +98,7 @@ def plot_comparison(reference, date, time):
     ax2.set_title(f"Path Comparison (2D) — {reference} vs IMU ({tag})")
     ax2.set_aspect("equal")
     ax2.legend()
-    plt.tight_layout()
-    plt.show()
+    fig2.tight_layout()
 
     # --- Plot 3D ---
     fig3 = plt.figure()
@@ -113,17 +112,23 @@ def plot_comparison(reference, date, time):
     ax3.set_box_aspect([1, 1, 1])
     ax3.view_init(elev=90, azim=-90)
     ax3.legend()
-    plt.tight_layout()
+    fig3.tight_layout()
+
     plt.show()
 
 # Main
 if __name__ == "__main__":
     # plot_reference_paths()
 
-    plot_comparison(
-        # 'Track 1',
-        # 'Track 2',
-        'Track 3',
-        '2026-06-11',
-        '140933'
-    )
+    reference_path = [
+        # 'Track 1'
+        # 'Track 2'
+        'Track 3'
+    ]
+    test_paths = [
+        # ['2026-06-11', '140830'],
+        # ['2026-06-11', '140853'],
+        ['2026-06-11', '140933'],
+    ]
+    for test_path in test_paths:
+        plot_comparison(*reference_path, *test_path)
