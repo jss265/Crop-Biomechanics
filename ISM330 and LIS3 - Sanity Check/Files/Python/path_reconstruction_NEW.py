@@ -39,7 +39,7 @@ GRAVITY_M_S2           = 9.80665
 def reconstruct_path(imu_path, mag_path):
     # Load CSVs (row 0 is metadata, row 1 is header)
     imu = pd.read_csv(imu_path, skiprows=1)
-    mag = pd.read_csv(mag_path, skiprows=1)  # loaded but not used
+    mag = pd.read_csv(mag_path, skiprows=1)
 
     t = imu["IMU_Time_sec"].values
 
@@ -94,7 +94,8 @@ def plot_comparison(reference, date, time):
 
 # Main
 if __name__ == "__main__":
-    plot_reference_paths()
+    # plot_reference_paths()
+
     plot_comparison(
         # 'Track 1',
         # 'Track 2',
