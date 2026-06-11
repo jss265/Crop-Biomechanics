@@ -698,8 +698,6 @@ uint16_t compute_crc(const uint8_t* data, size_t len) {
 void setup() {
   // Serial detection (non-blocking).
   Serial.begin(1000000);
-  delay(1000); // DELETE LATER debuging allows serial time to print for Reset reason
-  Serial.print("Reset reason: "); Serial.println((int)esp_reset_reason());
   unsigned long startTime = millis();
   while (!Serial) { if (millis() - startTime > 5000) break; }
   hasSerial = Serial;

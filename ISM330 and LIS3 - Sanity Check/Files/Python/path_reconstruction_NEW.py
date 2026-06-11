@@ -49,8 +49,8 @@ def reconstruct_path(imu_path, mag_path):
     ay = imu["Accel_Y_raw"].values * ACCEL_SCALE_MG_PER_LSB * 1e-3 * GRAVITY_M_S2
     az = imu["Accel_Z_raw"].values * ACCEL_SCALE_MG_PER_LSB * 1e-3 * GRAVITY_M_S2
 
-    # Remove static bias (mean of first 0.5 s)
-    static_mask = t_imu < 0.5
+    # Remove static bias (mean of first 4.5 s)
+    static_mask = t_imu < 4.5
     ax -= ax[static_mask].mean()
     ay -= ay[static_mask].mean()
     az -= az[static_mask].mean()
@@ -60,8 +60,22 @@ def reconstruct_path(imu_path, mag_path):
     vy = cumulative_trapezoid(ay, t_imu, initial=0)
     vz = cumulative_trapezoid(az, t_imu, initial=0)
 
-    
+    # Known final position in metres
+    desired_x, desired_y, desired_z = 0.0, 1.1684, 0.0  # 1168.4 mm → m
 
+    T = t_imu[-1]
+
+    # Integrate once to see where we'd end up
+    px_raw = cumulative_trapezoid(vx, t_imu, initial=0)
+    py_raw = cumulative_trapezoid(vy, t_imu, initial=0)
+    pz_raw = cumulative_trapezoid(vz, t_imu, initial=0)
+
+    # Constant velocity correction to hit the known endpoint
+    vx -= (px_raw[-1] - desired_x) / T
+    vy -= (py_raw[-1] - desired_y) / T
+    vz -= (pz_raw[-1] - desired_z) / T
+
+    # Final integration with corrected velocity
     px = cumulative_trapezoid(vx, t_imu, initial=0) * 1000  # m → mm
     py = cumulative_trapezoid(vy, t_imu, initial=0) * 1000
     pz = cumulative_trapezoid(vz, t_imu, initial=0) * 1000
@@ -97,7 +111,7 @@ def plot_comparison(reference, date, time):
     ax_3d.set_ylabel("Y (mm)")
     ax_3d.set_zlabel("Z (mm)")
     ax_3d.set_title(f"Path Comparison (3D) — {reference} vs IMU ({tag})")
-    ax_3d.set_box_aspect([1, 1, 1])
+    ax_3d.set_aspect('equal')
     ax_3d.view_init(elev=90, azim=-90)
     ax_3d.legend()
     fig_3d.tight_layout()
@@ -120,14 +134,14 @@ if __name__ == "__main__":
     # plot_reference_paths()
 
     reference_path = [
-        # 'Track 1'
+        'Track 1'
         # 'Track 2'
-        'Track 3'
+        # 'Track 3'
     ]
     test_paths = [
-        # ['2026-06-11', '140830'],
-        # ['2026-06-11', '140853'],
-        ['2026-06-11', '140933'],
+        ['2026-06-11', '154428'],
+        # ['2026-06-11', '154506'],
+        # ['2026-06-11', '154539'],
     ]
     for test_path in test_paths:
         plot_comparison(*reference_path, *test_path)
