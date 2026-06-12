@@ -1,0 +1,5 @@
+Files/CPP/Claude/FULL_COPILOT_1.cpp is sanity check
+
+Files/CPP/WiFi_persistentTCP_JSS1.cpp is half working. 
+Sometimes it records IMU data so that collect data can record it to one of three CSVs.
+It sometimes crashes, and never records ADS data.
