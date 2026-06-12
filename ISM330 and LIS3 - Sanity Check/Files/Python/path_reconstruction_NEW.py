@@ -60,20 +60,20 @@ def reconstruct_path(imu_path, mag_path):
     vy = cumulative_trapezoid(ay, t_imu, initial=0)
     vz = cumulative_trapezoid(az, t_imu, initial=0)
 
-    # Known final position in metres
-    desired_x, desired_y, desired_z = 0.0, 1.1684, 0.0  # 1168.4 mm → m
+    # # Known final position in metres
+    # desired_x, desired_y, desired_z = 0.0, 1.1684, 0.0  # 1168.4 mm → m
 
-    T = t_imu[-1]
+    # T = t_imu[-1]
 
-    # Integrate once to see where we'd end up
-    px_raw = cumulative_trapezoid(vx, t_imu, initial=0)
-    py_raw = cumulative_trapezoid(vy, t_imu, initial=0)
-    pz_raw = cumulative_trapezoid(vz, t_imu, initial=0)
+    # # Integrate once to see where we'd end up
+    # px_raw = cumulative_trapezoid(vx, t_imu, initial=0)
+    # py_raw = cumulative_trapezoid(vy, t_imu, initial=0)
+    # pz_raw = cumulative_trapezoid(vz, t_imu, initial=0)
 
-    # Constant velocity correction to hit the known endpoint
-    vx -= (px_raw[-1] - desired_x) / T
-    vy -= (py_raw[-1] - desired_y) / T
-    vz -= (pz_raw[-1] - desired_z) / T
+    # # Constant velocity correction to hit the known endpoint
+    # vx -= (px_raw[-1] - desired_x) / T
+    # vy -= (py_raw[-1] - desired_y) / T
+    # vz -= (pz_raw[-1] - desired_z) / T
 
     # Final integration with corrected velocity
     px = cumulative_trapezoid(vx, t_imu, initial=0) * 1000  # m → mm

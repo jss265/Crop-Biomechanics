@@ -206,9 +206,9 @@ struct SensorConfig {
 // NUM_SENSORS. To change pins or IDs, edit this array. No commenting out needed.
 SensorConfig all_configs[MAX_SENSORS] = {
   {'A', A_CS_PIN, A_DRDY_PIN},
-  {'B', B_CS_PIN, B_DRDY_PIN},
+  // {'B', B_CS_PIN, B_DRDY_PIN},
   {'C', C_CS_PIN, C_DRDY_PIN},
-  {'D', D_CS_PIN, D_DRDY_PIN},
+  // {'D', D_CS_PIN, D_DRDY_PIN},
   {'E', E_CS_PIN, E_DRDY_PIN}
 };
 
@@ -228,6 +228,8 @@ TaskHandle_t      adsTaskHandle[MAX_SENSORS] = {nullptr};
 // whether it needs to quiesce them before touching the bus. False at first boot;
 // flipped to true once setup() finishes attaching them.
 static bool g_imu_mag_attached = false;
+static bool g_imu_ok = false;
+static bool g_mag_ok = false;
 
 // ---- Shared packet queue (filled by ADS tasks + loop, drained by loop) -------------
 // std::deque of std::vector<uint8_t> mirrors the previous packet_queue, just now
@@ -457,9 +459,9 @@ void enableADCInterrupts() {
 // DRDY line is re-primed before we return.
 void initializeADCs() {
   if (g_imu_mag_attached) {
-    detachInterrupt(digitalPinToInterrupt(IMU_INT_PIN));
-    detachInterrupt(digitalPinToInterrupt(MAG_DRDY_PIN));
-    delay(2);                  // grace period: let any in-flight wrapper burst finish
+    if (g_imu_ok) detachInterrupt(digitalPinToInterrupt(IMU_INT_PIN));
+    if (g_mag_ok) detachInterrupt(digitalPinToInterrupt(MAG_DRDY_PIN));
+    delay(2);
   }
 
   broadcast_command(RESET);
@@ -518,9 +520,9 @@ void initializeADCs() {
   // when we entered. kickMag() forces a burst-read so the level-triggered LIS3MDL
   // DRDY goes LOW; the next sample then provides the RISING edge our ISR wants.
   if (g_imu_mag_attached) {
-    attachInterrupt(digitalPinToInterrupt(IMU_INT_PIN),  handleImuDrdy, RISING);
-    attachInterrupt(digitalPinToInterrupt(MAG_DRDY_PIN), handleMagDrdy, RISING);
-    ImuMagSpi::kickMag();
+    if (g_imu_ok) attachInterrupt(digitalPinToInterrupt(IMU_INT_PIN),  handleImuDrdy, RISING);
+    if (g_mag_ok) attachInterrupt(digitalPinToInterrupt(MAG_DRDY_PIN), handleMagDrdy, RISING);
+    if (g_mag_ok) ImuMagSpi::kickMag();
   }
 }
 
@@ -697,7 +699,10 @@ uint16_t compute_crc(const uint8_t* data, size_t len) {
 // ====================================================================================
 void setup() {
   // Serial detection (non-blocking).
-  Serial.begin(1000000);
+  Serial.begin(115200);
+  delay(5000);
+  Serial.print("Reset reason: "); Serial.println((int)esp_reset_reason());
+  // 1=POWERON, 4=PANIC, 6=TASK_WDT, 15=BROWNOUT
   unsigned long startTime = millis();
   while (!Serial) { if (millis() - startTime > 5000) break; }
   hasSerial = Serial;
@@ -716,8 +721,8 @@ void setup() {
   // line cannot accidentally enable a chip mid-SPI-transaction during boot.
   pinMode(IMU_CS_PIN, OUTPUT); digitalWrite(IMU_CS_PIN, HIGH);
   pinMode(MAG_CS_PIN, OUTPUT); digitalWrite(MAG_CS_PIN, HIGH);
-  pinMode(IMU_INT_PIN, INPUT);
-  pinMode(MAG_DRDY_PIN, INPUT);
+  pinMode(IMU_INT_PIN, INPUT_PULLDOWN);
+  pinMode(MAG_DRDY_PIN, INPUT_PULLDOWN);
 
   ImuMagSpi::Config imuCfg;
   imuCfg.spi         = &SPI;
@@ -728,11 +733,11 @@ void setup() {
   imuCfg.taskCore    = 1;                    // WiFi runs on core 0
   ImuMagSpi::begin(imuCfg);
 
-  bool imuOk = ImuMagSpi::initImu();
-  bool magOk = ImuMagSpi::initMag();
+  g_imu_ok = ImuMagSpi::initImu();
+  g_mag_ok = ImuMagSpi::initMag();
   if (hasSerial) {
-    Serial.print("ISM330DHCX init: "); Serial.println(imuOk ? "OK" : "FAIL (WHO_AM_I mismatch)");
-    Serial.print("LIS3MDL    init: "); Serial.println(magOk ? "OK" : "FAIL (WHO_AM_I mismatch)");
+    Serial.print("ISM330DHCX init: "); Serial.println(g_imu_ok ? "OK" : "FAIL (WHO_AM_I mismatch)");
+    Serial.print("LIS3MDL    init: "); Serial.println(g_mag_ok ? "OK" : "FAIL (WHO_AM_I mismatch)");
   }
 
   // ---- WiFi station mode (scan is intentionally informational only) ----
@@ -761,15 +766,16 @@ void setup() {
   // ArduinoOTA.setPassword(ota_password);
   // ArduinoOTA.begin();
 
-  // ADS1220 init (interrupts off until we actually connect to the host). This is the
-  // FIRST call to initializeADCs() so g_imu_mag_attached is still false; the IMU/Mag
-  // interrupts will be attached a few lines below.
+  // Spin up the per-ADS reader tasks FIRST. initializeADCs() transiently arms the
+  // ADS DRDY interrupts at its end (followed by a 50 ms settle), and the very first
+  // edge will vTaskNotifyGiveFromISR(adsTaskHandle[i]). If those handles are still
+  // nullptr we panic (reset_reason=4). Creating the tasks here makes the handles
+  // valid before any ISR can fire. The tasks block on notifyTake forever until
+  // their ISR pings them, so creating them early is harmless.
+  if (!startAdsTasks() && hasSerial) Serial.println("ADS task creation failed");
+
   initializeADCs();
   disableADCInterrupts();
-
-  // Spin up the per-ADS reader tasks now. They will block on notifyTake forever until
-  // their ISR fires, so it is safe to start them before ADS interrupts are enabled.
-  if (!startAdsTasks() && hasSerial) Serial.println("ADS task creation failed");
 
   // Start the IMU/Mag wrapper tasks BEFORE attaching their interrupts, so the task
   // handles inside the wrapper are valid by the time the first DRDY edge fires. This
@@ -777,10 +783,10 @@ void setup() {
   // dereference g_imuTask / g_magTask, so attaching the interrupts first would crash
   // on the very first edge.
   if (!ImuMagSpi::startTasks() && hasSerial) Serial.println("ImuMagSpi::startTasks failed");
-  attachInterrupt(digitalPinToInterrupt(IMU_INT_PIN),  handleImuDrdy, RISING);
-  attachInterrupt(digitalPinToInterrupt(MAG_DRDY_PIN), handleMagDrdy, RISING);
-  ImuMagSpi::kickMag();
-  g_imu_mag_attached = true;   // now subsequent initializeADCs() calls will quiesce them
+    if (g_imu_ok) attachInterrupt(digitalPinToInterrupt(IMU_INT_PIN),  handleImuDrdy, RISING);
+  if (g_mag_ok) attachInterrupt(digitalPinToInterrupt(MAG_DRDY_PIN), handleMagDrdy, RISING);
+  if (g_mag_ok) ImuMagSpi::kickMag();
+  g_imu_mag_attached = (g_imu_ok || g_mag_ok);
 
   SerialState = hasSerial ? HAS_SERIAL : NO_SERIAL;
   if (hasSerial) {
