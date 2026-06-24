@@ -951,7 +951,7 @@ if __name__ == "__main__":
     #                 probe_height_m=[0.785, 0.785],
     #                 header_content=[example_header_content, example_header_content])
     run_collection( nano_id=[1],
-                    sensors=["A B C D E"],
-                    sensor_sns=["001, 002, 003, 004, 005"],
+                    sensors=["A B C"],
+                    sensor_sns=["001, 003, 005"],
                     probe_height_m=[0.785],
                     header_content=[example_header_content, example_header_content])
