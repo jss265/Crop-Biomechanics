@@ -22,6 +22,12 @@
  *     for the MAG it counts DRDY edges that arrived while the previous one
  *     was still queued.  Under normal load both stay at 0.
  *
+ * Timing
+ *   - All wall-clock timing uses esp_timer_get_time() (int64 microseconds).
+ *     Unlike millis() (uint32 ms, wraps at ~49.7 days) this matches the
+ *     sample timestamps and will not wrap for any practical run length, so
+ *     the ODR window math stays correct well past 72 minutes.
+ *
  * Configured ODRs   :  IMU 6.66 kHz (accel+gyro)   MAG 1.00 kHz
  * Full-scale ranges :  +/-4 g, +/-2000 dps, +/-4 gauss
  ****************************************************************************/
@@ -33,10 +39,10 @@
 #include "esp_timer.h"
 
 // =========================== Pin map ====================================
-static constexpr int IMU_CS_PIN  = A4;  // ISM330DHCX CS
-static constexpr int MAG_CS_PIN  = A5;  // LIS3MDL    CS
-static constexpr int IMU_INT_PIN = A6;  // ISM330DHCX INT1 (FIFO watermark)
-static constexpr int MAG_INT_PIN = A7;  // LIS3MDL    DRDY
+static constexpr int IMU_CS_PIN  = A0;  // ISM330DHCX CS
+static constexpr int MAG_CS_PIN  = A1;  // LIS3MDL    CS
+static constexpr int IMU_INT_PIN = A2;  // ISM330DHCX INT1 (FIFO watermark)
+static constexpr int MAG_INT_PIN = A3;  // LIS3MDL    DRDY
 
 // =========================== SPI bus ====================================
 // Both parts: SPI mode 3, MSB first, <=10 MHz.  8 MHz leaves headroom.
@@ -305,14 +311,16 @@ static void magTask(void *) {
 }
 
 // =========================== Periodic, non-blocking prints ==============
-static constexpr uint32_t PRINT_INTERVAL_MS = 2500;
-static uint32_t lastPrintMs          = 0;
+// All timing is in microseconds via esp_timer_get_time() (int64), so the
+// interval gate and ODR window never wrap for any practical run length.
+static constexpr int64_t PRINT_INTERVAL_US = 2500000;  // 2.5 s
+static int64_t  lastPrintUs          = 0;
 static uint32_t lastImuCountSnapshot = 0;
 static uint32_t lastMagCountSnapshot = 0;
 
 void printODR() {
-  uint32_t now = millis();
-  if (now - lastPrintMs < PRINT_INTERVAL_MS) return;     // non-blocking gate
+  int64_t now = esp_timer_get_time();
+  if (now - lastPrintUs < PRINT_INTERVAL_US) return;    // non-blocking gate
 
   uint32_t imuN, magN, imuMiss, magMiss;
   portENTER_CRITICAL(&imuMux);
@@ -324,13 +332,13 @@ void printODR() {
   magMiss = magMissedCount;
   portEXIT_CRITICAL(&magMux);
 
-  float    dt   = (now - lastPrintMs) / 1000.0f;
+  float    dt   = (now - lastPrintUs) / 1000000.0f;
   uint32_t fImu = (uint32_t)lroundf((imuN - lastImuCountSnapshot) / dt);
   uint32_t fMag = (uint32_t)lroundf((magN - lastMagCountSnapshot) / dt);
 
   lastImuCountSnapshot = imuN;
   lastMagCountSnapshot = magN;
-  lastPrintMs          = now;
+  lastPrintUs          = now;
 
   // Spec format, plus a missed-sample diagnostic so you can verify
   // losslessness in real time. For the IMU "missed" = FIFO overrun events;
@@ -342,9 +350,9 @@ void printODR() {
 }
 
 void printVals() {
-  uint32_t now = millis();
-  if (now - lastPrintMs < PRINT_INTERVAL_MS) return;     // non-blocking gate
-  lastPrintMs = now;
+  int64_t now = esp_timer_get_time();
+  if (now - lastPrintUs < PRINT_INTERVAL_US) return;    // non-blocking gate
+  lastPrintUs = now;
 
   ImuSample i;
   MagSample m;
@@ -408,7 +416,7 @@ static bool initMag() {
 // =========================== setup / loop ===============================
 void setup() {
   Serial.begin(115200);
-  while (!Serial && millis() < 2000) {}
+  while (!Serial && esp_timer_get_time() < 2000000) {}
   Serial.println("\nISM330DHCX (FIFO watermark) + LIS3MDL (DRDY)  [SPI]");
 
   pinMode(IMU_CS_PIN, OUTPUT);  digitalWrite(IMU_CS_PIN, HIGH);
@@ -455,11 +463,11 @@ void setup() {
   // Baseline for the first ODR window so the first reading is accurate.
   portENTER_CRITICAL(&imuMux); lastImuCountSnapshot = imuSampleCount; portEXIT_CRITICAL(&imuMux);
   portENTER_CRITICAL(&magMux); lastMagCountSnapshot = magSampleCount; portEXIT_CRITICAL(&magMux);
-  lastPrintMs = millis();
+  lastPrintUs = esp_timer_get_time();
 }
 
 void loop() {
   // Comment out exactly ONE of the two lines below at a time:
-  printODR();
-  // printVals();
+  // printODR();
+  printVals();
 }
