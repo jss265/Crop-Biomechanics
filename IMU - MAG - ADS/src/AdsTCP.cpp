@@ -110,6 +110,7 @@
 /////////////////////////////////////////////////////////////////////////////////////////
 
 #include "Protocentral_ADS1220.h"
+#include <Arduino.h>
 #include <SPI.h>
 #include <WiFi.h>       // For WiFi Station mode
 #include <ArduinoOTA.h> // For Over-The-Air updates
@@ -117,22 +118,24 @@
 #include <vector>       // For storing binary packet data
 
 #define FULL_SCALE (1LL << 23) // 2^23 for 24-bit signed scaling - retained for reference, though not used in raw output
-#define A_DRDY_PIN 9
 #define A_CS_PIN 10
-#define B_DRDY_PIN 7
+#define A_DRDY_PIN 9
 #define B_CS_PIN 8
-#define C_DRDY_PIN 5
+#define B_DRDY_PIN 7
 #define C_CS_PIN 6
-#define D_DRDY_PIN 4
-#define D_CS_PIN 3
-#define E_DRDY_PIN 2
-#define E_CS_PIN A6
+#define C_DRDY_PIN 5
+#define D_CS_PIN 4
+#define D_DRDY_PIN 3
+#define E_CS_PIN 2
+#define E_DRDY_PIN A1
+#define F_CS_PIN A2
+#define F_DRDY_PIN A3
 
 const int SPI_SCK  = 13;   // default D13
 const int SPI_MISO = 11;   // default D12 (CIPO)
 const int SPI_MOSI = 12;   // default D11 (COPI)
 
-const int MAX_SENSORS = 5;     // Maximum possible sensors (A to E)
+const int MAX_SENSORS = 6;     // Maximum possible sensors (A to F)
 const int NUM_SENSORS = 3;     // Set to 1-5 to use the first N sensors from all_configs below.
 const uint8_t dr_code = DR_330SPS;  // Data Rate value. In turbo, value is for pairs/sec. In normal, value is for samples/sec
 const SPISettings spi_settings(2000000, MSBFIRST, SPI_MODE1);
@@ -167,14 +170,15 @@ SensorConfig all_configs[MAX_SENSORS] = {
   {'C', C_CS_PIN, C_DRDY_PIN},
   {'D', D_CS_PIN, D_DRDY_PIN},
   {'E', E_CS_PIN, E_DRDY_PIN},
+  {'F', F_CS_PIN, F_DRDY_PIN}
 };
 
 Protocentral_ADS1220 adcs[MAX_SENSORS];             // ADC objects from library
 int32_t raw_values[MAX_SENSORS][2];                 // [sensor][channel]: raw 24-bit signed ADC values; 0=ch1 (AIN0-1), 1=ch2 (AIN2-3)
-unsigned long timestamps[MAX_SENSORS];              // Per-chip timestamps for each pair
+uint32_t timestamps[MAX_SENSORS];                    // Per-chip timestamps for each pair
 uint8_t current_channels[MAX_SENSORS] = {0};        // Indicates which MUX channel to read from for an ADS1220 module
 volatile uint8_t ready_mask = 0;                    // Bitmask tracking ready sensors (bit i set to (1) when sensor i pair is complete)
-unsigned long time_init;                            // t=0 of datastream. Set each time connection initiates datastream
+uint32_t time_init;                            // t=0 of datastream. Set each time connection initiates datastream
 const unsigned long WiFi_CHECK_INTERVAL_MS = 1000;  // 1 Hz
 const unsigned long WiFi_RETRY_DELAY_MS = 5000;     // Retry connection every 5s if failed
 
@@ -215,25 +219,23 @@ struct ImuPacket {
   int16_t gx, gy, gz;
 };
 
-void IRAM_ATTR adsISR() {}
-
 void adsService(char ads_id) {
-  const int i = ads_id - 'A';               // Array index of sensor (A=0, B=1...)
-  unsigned long interrupt_time = micros();  // Record the time the ADC value was reported by DRDY interrupt pin. 
-                                            // Technically the time when the interrupt is processed, as interrupts on same core of same priority form queue
+  const int i = ads_id - 'A';                     // Array index of sensor (A=0, B=1...)
+  uint32_t service_time = micros();    // Record the time the ADC value was reported by DRDY interrupt pin. 
+                                                  // Technically the time when the interrupt is processed, as interrupts on same core of same priority form queue
   // Open SPI with sensor's ADS1220 chip/module
-  SPI.beginTransaction(spi_settings);       // Get SPI open with settings
-  digitalWrite(A_CS_PIN, LOW);              // Select particular sensor (cs='chip select')
-  delayMicroseconds(1);                     // Allow ADS1220 module to accept connection (50ns on datasheet)
+  SPI.beginTransaction(spi_settings);             // Get SPI open with settings
+  digitalWrite(all_configs[i].cs_pin, LOW);       // Select particular sensor (cs='chip select')
+  delayMicroseconds(1);                           // Allow ADS1220 module to accept connection (50ns on datasheet)
   // Retrieve 3 byte (24-bit) ADC result
-  byte SPI_Buf[3];                          // temporary local buffer to work with raw result before storing integer value
-  SPI_Buf[0] = SPI.transfer(0);             // Send dummy 0x00 byte on MOSI and receive one conversion byte on MISO
+  byte SPI_Buf[3];                                // temporary local buffer to work with raw result before storing integer value
+  SPI_Buf[0] = SPI.transfer(0);                   // Send dummy 0x00 byte on MOSI and receive one conversion byte on MISO
   SPI_Buf[1] = SPI.transfer(0);
   SPI_Buf[2] = SPI.transfer(0);
-  delayMicroseconds(1);                     // Allow communication to finish
+  delayMicroseconds(1);                           // Allow communication to finish
   // Close SPI
-  digitalWrite(A_CS_PIN, HIGH);             // Release sensor from SPI
-  SPI.endTransaction();                     // Release Nano's SPI bus
+  digitalWrite(all_configs[i].cs_pin, HIGH);      // Release sensor from SPI
+  SPI.endTransaction();                           // Release Nano's SPI bus
 
   long bits24 = (long)SPI_Buf[0] << 16 | (long)SPI_Buf[1] << 8 | SPI_Buf[2]; // Assemble 3 bytes into single 24-bit object (using 32-bit datatype)
   int32_t val = (bits24 << 8) >> 8;                                          // Sign-extend 24-bit to 32-bit. Copy sign bit 23 to bits 31-24 
@@ -250,10 +252,17 @@ void adsService(char ads_id) {
     current_channels[i] = 0;
 
     // When second channel is read, record time and mark sensor's bit in bitmask as ready (1)
-    timestamps[i] = interrupt_time - time_init;
+    timestamps[i] = service_time - time_init;
     ready_mask |= (1 << i);
   }
 }
+
+void IRAM_ATTR handleDrdyA() { adsService('A'); }
+void IRAM_ATTR handleDrdyB() { adsService('B'); }
+void IRAM_ATTR handleDrdyC() { adsService('C'); }
+void IRAM_ATTR handleDrdyD() { adsService('D'); }
+void IRAM_ATTR handleDrdyE() { adsService('E'); }
+void IRAM_ATTR handleDrdyF() { adsService('F'); }
 
 // Broadcast a command to all active sensors
 void broadcast_command(uint8_t cmd) {
@@ -278,7 +287,7 @@ void disableADCInterrupts() {
 
 // Enable interrupts for sensor DRDY pins
 void enableADCInterrupts() {
-  void (*isrHandlers[5])() = {handleDrdyA, handleDrdyB, handleDrdyC, handleDrdyD, handleDrdyE};
+  void (*isrHandlers[MAX_SENSORS])() = {handleDrdyA, handleDrdyB, handleDrdyC, handleDrdyD, handleDrdyE, handleDrdyF};
   for (int i = 0; i < NUM_SENSORS; i++) {
     attachInterrupt(digitalPinToInterrupt(all_configs[i].drdy_pin), isrHandlers[i], FALLING);
   }
@@ -360,6 +369,18 @@ bool checkDataReady() {
     return true;
   }
   return false;
+}
+
+// Compute WiFi cyclic redundancy check code for packet integrity check
+uint16_t compute_crc(const uint8_t* data, size_t len) {
+  uint16_t crc = 0xFFFF;  // CRC-CCITT initial value
+  for (size_t i = 0; i < len; i++) {
+    crc ^= data[i];
+    for (uint8_t j = 0; j < 8; j++) {
+      crc = (crc & 1) ? (crc >> 1) ^ 0xA001 : crc >> 1;
+    }
+  }
+  return crc;
 }
 
 // Build a binary packet from current data and add to queue
@@ -510,18 +531,6 @@ void monitorConnection() {
       if (hasSerial) Serial.println("Returning to CONNECTING state with OTA re-enabled.");
     }
   }
-}
-
-// Compute WiFi cyclic redundancy check code for packet integrity check
-uint16_t compute_crc(const uint8_t* data, size_t len) {
-  uint16_t crc = 0xFFFF;  // CRC-CCITT initial value
-  for (size_t i = 0; i < len; i++) {
-    crc ^= data[i];
-    for (uint8_t j = 0; j < 8; j++) {
-      crc = (crc & 1) ? (crc >> 1) ^ 0xA001 : crc >> 1;
-    }
-  }
-  return crc;
 }
 
 void setup() {
