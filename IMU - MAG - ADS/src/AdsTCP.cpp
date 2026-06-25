@@ -166,7 +166,7 @@ SensorConfig all_configs[MAX_SENSORS] = {
   {'B', B_CS_PIN, B_DRDY_PIN},
   {'C', C_CS_PIN, C_DRDY_PIN},
   {'D', D_CS_PIN, D_DRDY_PIN},
-  {'E', E_CS_PIN, E_DRDY_PIN}
+  {'E', E_CS_PIN, E_DRDY_PIN},
 };
 
 Protocentral_ADS1220 adcs[MAX_SENSORS];             // ADC objects from library
@@ -184,12 +184,6 @@ uint16_t seq_num = 0;                               // Sequence number for packe
 unsigned long last_batch_send = 0;                  // Timestamp of last batch send
 
 // FSM States
-enum State_Serial {
-  NO_SERIAL,    // No Serial connection
-  HAS_SERIAL,   // Serial connection active
-};
-State_Serial SerialState;
-
 enum State_WiFi {
   CONNECTING,   // Attempting to connect to host AP
   CONNECTED,    // Connected to host, sending data
@@ -199,14 +193,32 @@ State_WiFi WiFiState = CONNECTING;
 // Global flag for Serial presence, set in setup
 bool hasSerial = false;
 
-// Interrupt handlers for each possible sensor (0 to 4, corresponding to A to E).
-// These are defined as separate functions to ensure compatibility with attachInterrupt on ESP32.
-// We define all 5 even if NUM_SENSORS < 5, but only attach the ones we use.
-// The IRAM_ATTR attribute ensures they can be called from interrupt context efficiently.
-// All read functionality must be internal to each interrupt (no external SPI-reading functions or global reads).
-// Write functionality can be to external and using external functions.
-void IRAM_ATTR handleDrdyA() {
-  const int i = 0;                          // Array index of sensor
+// Packet types
+enum PacketType : uint8_t
+{
+  PKT_IMU = 1,
+  PKT_MAG = 2,
+  PKT_ADS = 3
+};
+struct AdsPacket {
+  uint64_t ts_us;
+  char adc_id;
+  int32_t raw1, raw2;
+};
+struct MagPacket {
+  uint64_t ts_us;
+  int16_t mx, my, mz;
+};
+struct ImuPacket {
+  uint64_t ts_us;
+  int16_t ax, ay, az;
+  int16_t gx, gy, gz;
+};
+
+void IRAM_ATTR adsISR() {}
+
+void adsService(char ads_id) {
+  const int i = ads_id - 'A';               // Array index of sensor (A=0, B=1...)
   unsigned long interrupt_time = micros();  // Record the time the ADC value was reported by DRDY interrupt pin. 
                                             // Technically the time when the interrupt is processed, as interrupts on same core of same priority form queue
   // Open SPI with sensor's ADS1220 chip/module
@@ -238,130 +250,6 @@ void IRAM_ATTR handleDrdyA() {
     current_channels[i] = 0;
 
     // When second channel is read, record time and mark sensor's bit in bitmask as ready (1)
-    timestamps[i] = interrupt_time - time_init;
-    ready_mask |= (1 << i);
-  }
-}
-
-void IRAM_ATTR handleDrdyB() {
-  const int i = 1;
-  unsigned long interrupt_time = micros();
-  SPI.beginTransaction(spi_settings);
-  digitalWrite(B_CS_PIN, LOW);
-  delayMicroseconds(1);
-  byte SPI_Buf[3];
-  SPI_Buf[0] = SPI.transfer(0);
-  SPI_Buf[1] = SPI.transfer(0);
-  SPI_Buf[2] = SPI.transfer(0);
-  delayMicroseconds(1);
-  digitalWrite(B_CS_PIN, HIGH);
-  SPI.endTransaction();
-
-  long bits24 = (long)SPI_Buf[0] << 16 | (long)SPI_Buf[1] << 8 | SPI_Buf[2];
-  int32_t val = (bits24 << 8) >> 8;
-
-  if (current_channels[i] == 0) {
-    raw_values[i][0] = val;
-    adcs[i].select_mux_channels(MUX_AIN2_AIN3);
-    current_channels[i] = 1;
-  } 
-  else {
-    raw_values[i][1] = val;
-    adcs[i].select_mux_channels(MUX_AIN0_AIN1);
-    current_channels[i] = 0;
-    timestamps[i] = interrupt_time - time_init;
-    ready_mask |= (1 << i);
-  }
-}
-
-void IRAM_ATTR handleDrdyC() {
-  const int i = 2;
-  unsigned long interrupt_time = micros();
-  SPI.beginTransaction(spi_settings);
-  digitalWrite(C_CS_PIN, LOW);
-  delayMicroseconds(1);
-  byte SPI_Buf[3];
-  SPI_Buf[0] = SPI.transfer(0);
-  SPI_Buf[1] = SPI.transfer(0);
-  SPI_Buf[2] = SPI.transfer(0);
-  delayMicroseconds(1);
-  digitalWrite(C_CS_PIN, HIGH);
-  SPI.endTransaction();
-
-  long bits24 = (long)SPI_Buf[0] << 16 | (long)SPI_Buf[1] << 8 | SPI_Buf[2];
-  int32_t val = (bits24 << 8) >> 8;
-
-  if (current_channels[i] == 0) {
-    raw_values[i][0] = val;
-    adcs[i].select_mux_channels(MUX_AIN2_AIN3);
-    current_channels[i] = 1;
-  } 
-  else {
-    raw_values[i][1] = val;
-    adcs[i].select_mux_channels(MUX_AIN0_AIN1);
-    current_channels[i] = 0;
-    timestamps[i] = interrupt_time - time_init;
-    ready_mask |= (1 << i);
-  }
-}
-
-void IRAM_ATTR handleDrdyD() {
-  const int i = 3;
-  unsigned long interrupt_time = micros();
-  SPI.beginTransaction(spi_settings);
-  digitalWrite(D_CS_PIN, LOW);
-  delayMicroseconds(1);
-  byte SPI_Buf[3];
-  SPI_Buf[0] = SPI.transfer(0);
-  SPI_Buf[1] = SPI.transfer(0);
-  SPI_Buf[2] = SPI.transfer(0);
-  delayMicroseconds(1);
-  digitalWrite(D_CS_PIN, HIGH);
-  SPI.endTransaction();
-
-  long bits24 = (long)SPI_Buf[0] << 16 | (long)SPI_Buf[1] << 8 | SPI_Buf[2];
-  int32_t val = (bits24 << 8) >> 8;
-
-  if (current_channels[i] == 0) {
-    raw_values[i][0] = val;
-    adcs[i].select_mux_channels(MUX_AIN2_AIN3);
-    current_channels[i] = 1;
-  } 
-  else {
-    raw_values[i][1] = val;
-    adcs[i].select_mux_channels(MUX_AIN0_AIN1);
-    current_channels[i] = 0;
-    timestamps[i] = interrupt_time - time_init;
-    ready_mask |= (1 << i);
-  }
-}
-
-void IRAM_ATTR handleDrdyE() {
-  const int i = 4;
-  unsigned long interrupt_time = micros();
-  SPI.beginTransaction(spi_settings);
-  digitalWrite(E_CS_PIN, LOW);
-  delayMicroseconds(1);
-  byte SPI_Buf[3];
-  SPI_Buf[0] = SPI.transfer(0);
-  SPI_Buf[1] = SPI.transfer(0);
-  SPI_Buf[2] = SPI.transfer(0);
-  delayMicroseconds(1);
-  digitalWrite(E_CS_PIN, HIGH);
-  SPI.endTransaction();
-
-  long bits24 = (long)SPI_Buf[0] << 16 | (long)SPI_Buf[1] << 8 | SPI_Buf[2];
-  int32_t val = (bits24 << 8) >> 8;
-
-  if (current_channels[i] == 0) {
-    raw_values[i][0] = val;
-    adcs[i].select_mux_channels(MUX_AIN2_AIN3);
-    current_channels[i] = 1;
-  } 
-  else {
-    raw_values[i][1] = val;
-    adcs[i].select_mux_channels(MUX_AIN0_AIN1);
-    current_channels[i] = 0;
     timestamps[i] = interrupt_time - time_init;
     ready_mask |= (1 << i);
   }
@@ -694,66 +582,34 @@ void setup() {
   disableADCInterrupts();
 
   // Set initial state based on Serial
-  SerialState = hasSerial ? HAS_SERIAL : NO_SERIAL;
   if (hasSerial) { 
     Serial.print("Initial state: ");
-    Serial.println(SerialState == HAS_SERIAL ? "HAS_SERIAL" : "NO_SERIAL");
+    Serial.println(hasSerial ? "HAS_SERIAL" : "NO_SERIAL");
   }
 
   last_batch_send = millis();
 }
 
 void loop() {
-
   // State-specific actions
-  switch (SerialState) {
-    case NO_SERIAL: { // Do nothing with the serial port
-      
-      switch (WiFiState) {
-        case CONNECTED: {
-          if (checkDataReady()) {
-            queueDataPacket();  // Build and queue binary packet
-          }
-          // Check if time to send batch
-          unsigned long now = millis();
-          if (now - last_batch_send >= BATCH_SEND_INTERVAL_MS) {
-            sendQueuedDataTCP();
-            last_batch_send = now;
-          }
-          monitorConnection();
-        } break;
-        case CONNECTING: {
-          disableADCInterrupts();
-          handleOTA();
-          connectToHost();
-        } break;
-
+  switch (WiFiState) {
+    case CONNECTED: { // Connected, do not allow OTA updates and send datastream to host 
+      if (checkDataReady()) {
+        queueDataPacket();  // Build and queue binary packet
+        if (hasSerial) sendDataSerial();   // Also send over serial for debugging
       }
-    } break;
-    
-    case HAS_SERIAL: {  // Send data over serial port at all times
-
-      switch (WiFiState) {
-        case CONNECTED: { // Connected, do not allow OTA updates and send datastream to host 
-          if (checkDataReady()) {
-            queueDataPacket();  // Build and queue binary packet
-            sendDataSerial();   // Also send over serial for debugging
-          }
-          // Check if time to send batch
-          unsigned long now = millis();
-          if (now - last_batch_send >= BATCH_SEND_INTERVAL_MS) {
-            sendQueuedDataTCP();
-            last_batch_send = now;
-          }
-          monitorConnection();
-        } break;        
-        case CONNECTING: { // Not connected, but attempt connection and allow OTA updates
-          disableADCInterrupts();
-          handleOTA();
-          connectToHost();
-        } break;
+      // Check if time to send batch
+      unsigned long now = millis();
+      if (now - last_batch_send >= BATCH_SEND_INTERVAL_MS) {
+        sendQueuedDataTCP();
+        last_batch_send = now;
       }
+      monitorConnection();
+    } break;        
+    case CONNECTING: { // Not connected, but attempt connection and allow OTA updates
+      disableADCInterrupts();
+      handleOTA();
+      connectToHost();
     } break;
   }
-
 }
