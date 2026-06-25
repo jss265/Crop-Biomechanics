@@ -39,10 +39,10 @@
 #include "esp_timer.h"
 
 // =========================== Pin map ====================================
-static constexpr int IMU_CS_PIN  = A0;  // ISM330DHCX CS
-static constexpr int MAG_CS_PIN  = A1;  // LIS3MDL    CS
-static constexpr int IMU_INT_PIN = A2;  // ISM330DHCX INT1 (FIFO watermark)
-static constexpr int MAG_INT_PIN = A3;  // LIS3MDL    DRDY
+static constexpr int IMU_CS_PIN  = A4;  // ISM330DHCX CS
+static constexpr int MAG_CS_PIN  = A5;  // LIS3MDL    CS
+static constexpr int IMU_INT_PIN = A6;  // ISM330DHCX INT1 (FIFO watermark)
+static constexpr int MAG_INT_PIN = A7;  // LIS3MDL    DRDY
 
 // =========================== SPI bus ====================================
 // Both parts: SPI mode 3, MSB first, <=10 MHz.  8 MHz leaves headroom.
