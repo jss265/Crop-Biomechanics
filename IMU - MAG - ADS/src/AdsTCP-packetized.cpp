@@ -164,7 +164,7 @@ struct SensorConfig {
 
 // Full list of configurations for sensors A to E. The code uses only the first NUM_SENSORS.
 // To change pins or IDs, edit this array. No commenting out needed - just set NUM_SENSORS.
-SensorConfig all_configs[MAX_SENSORS] = {
+SensorConfig ADS_sensors[MAX_SENSORS] = {
   {'A', A_CS_PIN, A_DRDY_PIN},
   {'B', B_CS_PIN, B_DRDY_PIN},
   {'C', C_CS_PIN, C_DRDY_PIN},
@@ -174,8 +174,6 @@ SensorConfig all_configs[MAX_SENSORS] = {
 };
 
 Protocentral_ADS1220 adcs[MAX_SENSORS];             // ADC objects from library
-int32_t raw_values[MAX_SENSORS][2];                 // [sensor][channel]: raw 24-bit signed ADC values; 0=ch1 (AIN0-1), 1=ch2 (AIN2-3)
-uint32_t timestamps[MAX_SENSORS];                    // Per-chip timestamps for each pair
 uint8_t current_channels[MAX_SENSORS] = {0};        // Indicates which MUX channel to read from for an ADS1220 module
 volatile uint8_t ready_mask = 0;                    // Bitmask tracking ready sensors (bit i set to (1) when sensor i pair is complete)
 uint32_t time_init;                            // t=0 of datastream. Set each time connection initiates datastream
@@ -221,11 +219,11 @@ struct ImuPacket {
 
 void adsService(char ads_id) {
   const int i = ads_id - 'A';                     // Array index of sensor (A=0, B=1...)
-  uint32_t service_time = micros();    // Record the time the ADC value was reported by DRDY interrupt pin. 
+  uint32_t service_time = micros();               // Record the time the ADC value was reported by DRDY interrupt pin. 
                                                   // Technically the time when the interrupt is processed, as interrupts on same core of same priority form queue
   // Open SPI with sensor's ADS1220 chip/module
   SPI.beginTransaction(spi_settings);             // Get SPI open with settings
-  digitalWrite(all_configs[i].cs_pin, LOW);       // Select particular sensor (cs='chip select')
+  digitalWrite(ADS_sensors[i].cs_pin, LOW);       // Select particular sensor (cs='chip select')
   delayMicroseconds(1);                           // Allow ADS1220 module to accept connection (50ns on datasheet)
   // Retrieve 3 byte (24-bit) ADC result
   byte SPI_Buf[3];                                // temporary local buffer to work with raw result before storing integer value
@@ -234,7 +232,7 @@ void adsService(char ads_id) {
   SPI_Buf[2] = SPI.transfer(0);
   delayMicroseconds(1);                           // Allow communication to finish
   // Close SPI
-  digitalWrite(all_configs[i].cs_pin, HIGH);      // Release sensor from SPI
+  digitalWrite(ADS_sensors[i].cs_pin, HIGH);      // Release sensor from SPI
   SPI.endTransaction();                           // Release Nano's SPI bus
 
   long bits24 = (long)SPI_Buf[0] << 16 | (long)SPI_Buf[1] << 8 | SPI_Buf[2]; // Assemble 3 bytes into single 24-bit object (using 32-bit datatype)
@@ -269,19 +267,19 @@ void broadcast_command(uint8_t cmd) {
   // Lower all CS pins for the active sensors to broadcast the command to all chips.
   // We loop only over NUM_SENSORS to avoid affecting unused pins.
   for (int i = 0; i < NUM_SENSORS; i++) {
-    digitalWrite(all_configs[i].cs_pin, LOW);
+    digitalWrite(ADS_sensors[i].cs_pin, LOW);
   }
   SPI.transfer(cmd);  // Send the command to all sensors at once
   // Raise all CS pins for active sensors
   for (int i = 0; i < NUM_SENSORS; i++) {
-    digitalWrite(all_configs[i].cs_pin, HIGH);
+    digitalWrite(ADS_sensors[i].cs_pin, HIGH);
   }
 }
 
 // Disable interrupts for sensor DRDY pins
 void disableADCInterrupts() {
   for (int i = 0; i < NUM_SENSORS; i++) {
-    detachInterrupt(digitalPinToInterrupt(all_configs[i].drdy_pin));
+    detachInterrupt(digitalPinToInterrupt(ADS_sensors[i].drdy_pin));
   }
 }
 
@@ -289,7 +287,7 @@ void disableADCInterrupts() {
 void enableADCInterrupts() {
   void (*isrHandlers[MAX_SENSORS])() = {handleDrdyA, handleDrdyB, handleDrdyC, handleDrdyD, handleDrdyE, handleDrdyF};
   for (int i = 0; i < NUM_SENSORS; i++) {
-    attachInterrupt(digitalPinToInterrupt(all_configs[i].drdy_pin), isrHandlers[i], FALLING);
+    attachInterrupt(digitalPinToInterrupt(ADS_sensors[i].drdy_pin), isrHandlers[i], FALLING);
   }
 }
 
@@ -304,7 +302,7 @@ void initializeADCs() {
 
   // ADS1220 initialization
   for (int i = 0; i < NUM_SENSORS; i++) {
-    adcs[i].begin(all_configs[i].cs_pin, all_configs[i].drdy_pin);
+    adcs[i].begin(ADS_sensors[i].cs_pin, ADS_sensors[i].drdy_pin);
     adcs[i].set_OperationMode(MODE_TURBO);
     adcs[i].set_data_rate(dr_code);
     adcs[i].PGA_ON();
@@ -312,12 +310,11 @@ void initializeADCs() {
     adcs[i].set_VREF(VREF_ANALOG);
     adcs[i].set_conv_mode_continuous();
     adcs[i].select_mux_channels(MUX_AIN0_AIN1);
-    current_channels[i] = 0;
 
     if (hasSerial) {
       Serial.print("Setup complete for Sensor [enumerated as: "); Serial.print(i); Serial.println("]");
-      Serial.print("CS: "); Serial.print(all_configs[i].cs_pin); 
-      Serial.print(" DRDY: "); Serial.println(all_configs[i].drdy_pin);
+      Serial.print("CS: "); Serial.print(ADS_sensors[i].cs_pin); 
+      Serial.print(" DRDY: "); Serial.println(ADS_sensors[i].drdy_pin);
     }
     delay(100);
   }
