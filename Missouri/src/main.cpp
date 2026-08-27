@@ -895,9 +895,7 @@ bool bringup_IMU() {
           id_ok = true;
           break;
       }
-      if (attempt < 10) {
-          delay(50);
-      }
+      delay(50);
   }
 
   if (!id_ok) {
@@ -947,9 +945,7 @@ bool bringup_MAG() {
           id_ok = true;
           break;
       }
-      if (attempt < 10) {
-          delay(50);
-      }
+      delay(50);
   }
 
   if (!id_ok) {
